@@ -4,57 +4,140 @@ Desktopowa aplikacja Windows 11 do przegladania i edycji WSZYSTKICH lokalnych za
 
 ## Cel
 
-Uzytkownik (SĹ‚awek) ma rozproszone pliki konfiguracji, pamieci, regul, skilli, hookow i serwerow MCP w wielu lokalizacjach na dysku. Aplikacja ma je wszystkie wyswietlic w jednym oknie z drzewem nawigacji, edytorem z podswietlaniem skladni i podgladem mergeowanych ustawien.
+Uzytkownik (Slawek) ma rozproszone pliki konfiguracji, pamieci, regul, skilli, hookow i serwerow MCP w wielu lokalizacjach na dysku. Aplikacja ma je wszystkie wyswietlic w jednym oknie z drzewem nawigacji, edytorem z podswietlaniem skladni i podgladem mergeowanych ustawien.
+
+## Stan implementacji
+
+### ZROBIONE (Faza 1 MVP + rozszerzenia)
+
+- **Scanner** - wykrywanie zasobow na 6 poziomach (managed, user, project, local, auto-memory, external)
+- **TreeView** - drzewo zasobow z kategoriami (bold) i zasobami (klikalne)
+- **Editor** - QPlainTextEdit read-only z naglowkiem scope/path
+- **History** - przegladarka historii promptow z `~/.claude/history.jsonl`
+- **Relocations** - naprawianie przeniesionych/usunietych projektow przez wskazanie nowej lokalizacji
+- **Context menu** - prawy klik na projekcie: Open in Explorer / VS Code / Terminal / Copy path
+- **Path resolver** - dekodowanie hash-nazw katalogow Claude Code na rzeczywiste sciezki Windows
+- **Dark theme** - VS Code style, ciemny motyw
+- **Desktop shortcut** - launcher.pyw + create_shortcut.py
+- **Testy** - 26 testow pytest (parsers, models, scanner)
+
+### DO ZROBIENIA (Fazy 2-5)
+
+- Faza 2: Edycja plikow (QScintilla, podswietlanie skladni, zapis Ctrl+S, taby, walidacja JSON)
+- Faza 3: Wizualny konfigurator hookow i MCP (formularze, drag & drop)
+- Faza 4: Merged settings + diff (preview panel, porownanie scope'ow)
+- Faza 5: File watching + .exe (watchdog, auto-refresh, PyInstaller)
+
+## Uruchomienie
+
+```bash
+# Z konsoli
+.venv/Scripts/python.exe main.py
+
+# Testy
+.venv/Scripts/python.exe -m pytest tests/ -v
+
+# Skrot na pulpicie (jednorazowo)
+.venv/Scripts/python.exe create_shortcut.py
+```
 
 ## Stack
 
-- **Python 3.12+**
+- **Python 3.13** (.venv w katalogu projektu)
 - **PySide6** (Qt6) - UI framework
-- **QScintilla** - edytor kodu z podswietlaniem skladni (Markdown, JSON)
-- **watchdog** - monitorowanie zmian plikow (live reload)
-- **PyInstaller** - pakowanie do .exe (faza 5)
+- **watchdog** - monitorowanie zmian plikow (zainstalowany, uzyty w fazie 5)
 - **pytest** - testy
+- **pywin32** - tworzenie skrotu na pulpicie
 
 ## Struktura projektu
 
 ```
 claude-env-manager/
-  CLAUDE.md              # ten plik
-  requirements.txt       # PySide6, QScintilla, watchdog, pytest
-  main.py                # entry point (QApplication)
+  CLAUDE.md                # ten plik - specyfikacja i dokumentacja
+  requirements.txt         # PySide6, QScintilla, watchdog, pytest
+  main.py                  # entry point (QApplication + dark theme)
+  launcher.pyw             # launcher bez konsoli (pythonw.exe)
+  create_shortcut.py       # tworzy skrot .lnk na pulpicie
+  relocations.json         # mapowanie starych sciezek projektow na nowe (generowany)
   src/
     scanner/
       __init__.py
-      discovery.py       # wykrywanie sciezek i plikow
-      indexer.py         # budowanie modelu drzewa
+      discovery.py         # wykrywanie sciezek i plikow na 6 poziomach
+      indexer.py           # budowanie TreeNode z wykrytych zasobow
     models/
       __init__.py
-      resource.py        # dataclass Resource (path, type, scope, content)
-      project.py         # dataclass Project (name, root_path, resources[])
+      resource.py          # dataclass Resource (path, type, scope, content, read_only, masked)
+      project.py           # dataclass Project (name, root_path, resources[], session_count)
+      history.py           # dataclass HistoryEntry + load_history() z history.jsonl
     ui/
       __init__.py
-      main_window.py     # QMainWindow z layout
-      tree_panel.py      # QTreeView + model
-      editor_panel.py    # QScintilla editor z tabami
-      preview_panel.py   # podglad merged settings / diff
-      status_bar.py      # sciezka, status watch, timestamp
+      main_window.py       # QMainWindow z QSplitter + QTabWidget (Resources | History)
+      tree_panel.py        # QTreeView + QStandardItemModel + context menu
+      editor_panel.py      # QPlainTextEdit read-only z naglowkiem
+      history_panel.py     # QTreeWidget z grupowaniem Project > Thread > Message
+      status_bar.py        # sciezka, scope, typ, timestamp
     watchers/
-      __init__.py
-      file_watcher.py    # watchdog FileSystemEventHandler
+      __init__.py           # (puste - do fazy 5)
     utils/
       __init__.py
-      parsers.py         # JSON, Markdown, YAML frontmatter
-      paths.py           # rozwiazywanie sciezek Windows
-      security.py        # maskowanie credentials
+      parsers.py           # read_text, parse_json, extract_frontmatter, detect_file_format
+      paths.py             # wszystkie sciezki Claude Code (managed, user, projects, external)
+      security.py          # mask_value, mask_dict - maskowanie credentials
+      relocations.py       # load/save/remove relokacji przeniesionych projektow
   tests/
-    test_scanner.py
-    test_parsers.py
-    test_models.py
+    __init__.py
+    test_scanner.py        # testy indexer + TreeNode
+    test_parsers.py        # testy parsers (JSON, frontmatter, format detection)
+    test_models.py         # testy Resource + Project
 ```
+
+## Kluczowe mechanizmy
+
+### Dekodowanie hash-nazw projektow (discovery.py)
+
+Claude Code koduje sciezki projektow w `~/.claude/projects/` zamieniajac kazdy nie-alfanumeryczny znak (w tym `.`, `_`, `!`, spacje, separatory, znaki non-ASCII) na `-`. Np:
+
+- `C:\Users\Slawek\Documents\.MD\PARA\SER\10_PROJEKTY\SIDE\code-matrix`
+- -> `C--Users-S-awek-Documents--MD-PARA-SER-10-PROJEKTY-SIDE-code-matrix`
+
+Resolver w `_walk_resolve()` idzie od katalogu domowego, na kazdym poziomie listuje istniejace katalogi, koduje ich nazwy i porownuje z hashem (greedy longest match). Dziala z:
+- Znakami specjalnymi (`!Projekty` -> `-Projekty`)
+- Kropkami (`.MD` -> `-MD`)
+- Podkresleniami (`10_PROJEKTY` -> `10-PROJEKTY`)
+- Znakami non-ASCII (`Slawek` -> `S-awek`)
+- Case-insensitive drive letter (`c--` = `C--`)
+
+### Historia (history_panel.py)
+
+Plik `~/.claude/history.jsonl` - kazda linia to JSON:
+```json
+{"display": "tresc prompta", "timestamp": 1775401252442, "project": "C:\\...", "sessionId": "uuid"}
+```
+
+Grupowanie: **Projekt** (pelna sciezka) > **Watek** (sessionId, tytul = pierwszy prompt) > **Wiadomosci** (chronologicznie).
+
+Kolory w drzewie:
+- Niebieski (#569cd6) = projekt istnieje na dysku
+- Turkusowy (#4ec9b0) = projekt przeniesiony (relokacja)
+- Szary (#808080) = projekt nie znaleziony
+
+### Relokacje (relocations.py)
+
+Plik `relocations.json` w katalogu aplikacji. Mapowanie `stara_sciezka -> nowa_sciezka`. Prawy klik na szarym projekcie -> "Relocate project..." -> dialog wyboru katalogu. Relokacje mozna usunac ("Remove relocation").
+
+### Context menu (tree_panel.py, history_panel.py)
+
+Prawy klik na projekcie/zasobie:
+- Open in Explorer (`os.startfile`)
+- Open in VS Code (`code <path>`)
+- Open terminal here (`cmd /k cd /d <path>`)
+- Copy path
+- Relocate project... (tylko dla brakujacych)
+- Remove relocation (tylko dla przeniesionych)
 
 ## Zrodla danych - KOMPLETNA LISTA
 
-Aplikacja musi wykrywac i wyswietlac WSZYSTKIE ponizsze zasoby. Sciezki sa dla Windows 11, user `SĹ‚awek`.
+Aplikacja wykrywa i wyswietla WSZYSTKIE ponizsze zasoby. Sciezki sa dla Windows 11, user `Slawek`.
 
 ### Poziom 1: MANAGED (read-only, najwyzszy priorytet)
 
@@ -67,14 +150,15 @@ Aplikacja musi wykrywac i wyswietlac WSZYSTKIE ponizsze zasoby. Sciezki sa dla W
 
 | Zasob | Sciezka | Format | Dane |
 |---|---|---|---|
-| Settings globalne | `C:\Users\SĹ‚awek\.claude\settings.json` | JSON | permissions, hooks, env, model, autoMemoryEnabled, theme, sandbox |
-| Settings lokalne | `C:\Users\SĹ‚awek\.claude\settings.local.json` | JSON | Nadpisania (wyzszy priorytet niz settings.json) |
-| Credentials | `C:\Users\SĹ‚awek\.claude\.credentials.json` | JSON | oauth tokens, api_key, provider - **MASKOWAC** |
-| CLAUDE.md osobisty | `C:\Users\SĹ‚awek\.claude\CLAUDE.md` | Markdown | Instrukcje ladowane na starcie kazdej sesji |
-| MCP serwery | `C:\Users\SĹ‚awek\.claude\.mcp.json` | JSON | mcpServers.{nazwa}.type/command/args/env/auth |
-| Reguly osobiste | `C:\Users\SĹ‚awek\.claude\rules\*.md` | Markdown | Pliki .md z opcjonalnym frontmatter `paths:` |
-| Skille | `C:\Users\SĹ‚awek\.claude\skills\*\SKILL.md` | Markdown | Frontmatter: title, description, trigger, permissions[], tools[], model |
-| Stan globalny | `C:\Users\SĹ‚awek\.claude.json` | JSON | theme, userId, lastLogin, mcpServers, keybindings |
+| Settings globalne | `~\.claude\settings.json` | JSON | permissions, hooks, env, model, autoMemoryEnabled, theme, sandbox |
+| Settings lokalne | `~\.claude\settings.local.json` | JSON | Nadpisania (wyzszy priorytet niz settings.json) |
+| Credentials | `~\.claude\.credentials.json` | JSON | oauth tokens, api_key, provider - **MASKOWAC** |
+| CLAUDE.md osobisty | `~\.claude\CLAUDE.md` | Markdown | Instrukcje ladowane na starcie kazdej sesji |
+| MCP serwery | `~\.claude\.mcp.json` | JSON | mcpServers.{nazwa}.type/command/args/env/auth |
+| Reguly osobiste | `~\.claude\rules\*.md` | Markdown | Pliki .md z opcjonalnym frontmatter `paths:` |
+| Skille | `~\.claude\skills\*\SKILL.md` | Markdown | Frontmatter: title, description, trigger, permissions[], tools[], model |
+| Stan globalny | `~\.claude.json` | JSON | theme, userId, lastLogin, mcpServers, keybindings |
+| Historia promptow | `~\.claude\history.jsonl` | JSONL | display, timestamp, project, sessionId, pastedContents |
 
 ### Poziom 3: PROJECT (per-projekt, wspoldzielone via git)
 
@@ -100,9 +184,10 @@ Dla KAZDEGO wykrytego projektu (katalogu z `.git/`):
 
 | Zasob | Sciezka | Format |
 |---|---|---|
-| Indeks pamieci | `C:\Users\SĹ‚awek\.claude\projects\<hash>\memory\MEMORY.md` | Markdown |
-| Pliki tematyczne | `C:\Users\SĹ‚awek\.claude\projects\<hash>\memory\*.md` | Markdown |
-| Pamiec subagentow | `C:\Users\SĹ‚awek\.claude\projects\<hash>\agents\<name>\memory\*.md` | Markdown |
+| Indeks pamieci | `~\.claude\projects\<hash>\memory\MEMORY.md` | Markdown |
+| Pliki tematyczne | `~\.claude\projects\<hash>\memory\*.md` | Markdown |
+| Pamiec subagentow | `~\.claude\projects\<hash>\agents\<name>\memory\*.md` | Markdown |
+| Logi sesji | `~\.claude\projects\<hash>\*.jsonl` | JSONL |
 
 Hash projektu jest oparty o sciezke git repo. Wszystkie worktree wspoldziela pamiec.
 
@@ -110,9 +195,9 @@ Hash projektu jest oparty o sciezke git repo. Wszystkie worktree wspoldziela pam
 
 | Zasob | Sciezka | Format | Dane |
 |---|---|---|---|
-| Git config | `C:\Users\SĹ‚awek\.gitconfig` | INI-like | user.name, user.email, signingkey |
+| Git config | `~\.gitconfig` | INI-like | user.name, user.email, signingkey |
 | VS Code settings | `%APPDATA%\Code\User\settings.json` | JSON | Rozszerzenia Claude, keybindings |
-| SSH keys | `C:\Users\SĹ‚awek\.ssh\` | Rozne | Klucze do podpisywania commitow |
+| SSH keys | `~\.ssh\` | Rozne | Klucze do podpisywania commitow |
 | Zmienne srodowiskowe | System | - | ANTHROPIC_API_KEY, CLAUDE_CONFIG_DIR, CLAUDE_CODE_GIT_BASH_PATH itd. |
 
 ## Hierarchia priorytetow ustawien
@@ -155,115 +240,44 @@ Format w settings.json:
 }
 ```
 
-## Layout UI
+## Layout UI (aktualny)
 
 ```
 +---------------------------------------------------+
-|  Menu: File | View | Tools | Help                  |
-+----------+------------------------+---------------+
-|          |                        |               |
-| TreeView |   Editor (tabs)        | Preview Panel |
-|          |                        | (opcjonalny)  |
-| Kategorie|   QScintilla           |               |
-| - Settings|  Markdown/JSON        | Merged view   |
-| - Memory |   podswietlanie       | Diff view     |
-| - Rules  |                        |               |
-| - Skills |                        |               |
-| - Hooks  |                        |               |
-| - MCP    |                        |               |
-| - Agents |                        |               |
-| - External|                       |               |
-|          |                        |               |
-+----------+------------------------+---------------+
-| Status: sciezka | watch status | ostatnia zmiana  |
+|  Menu: File | View | Help                          |
++----------+----------------------------------------+
+|          | [Resources] [History]    <- QTabWidget   |
+| TreeView |                                         |
+|          | Tab Resources:                          |
+| Kategorie|   Header: SCOPE: path [READ-ONLY]      |
+| - Managed|   QPlainTextEdit (read-only)            |
+| - User   |                                         |
+| - Projects| Tab History:                           |
+| - External|   [Search: ___] [812/812]              |
+|          |   Project > Thread > Message tree       |
+| PPM:     |   Detail panel (prompt + metadata)      |
+| Explorer |                                         |
+| VS Code  |                                         |
+| Terminal |                                         |
+| Copy path|                                         |
++----------+----------------------------------------+
+| Status: sciezka | scope | type | timestamp         |
 +---------------------------------------------------+
 ```
 
-### TreeView - struktura drzewa
+### Skroty klawiszowe
 
-```
-Managed (read-only)
-  managed-settings.json
-  CLAUDE.md
-User
-  settings.json
-  settings.local.json
-  CLAUDE.md
-  .credentials.json [MASKED]
-  .mcp.json
-  .claude.json
-  Rules/
-    rule1.md
-    rule2.md
-  Skills/
-    skill1/SKILL.md
-Projects/
-  project-name-1/
-    CLAUDE.md
-    CLAUDE.local.md
-    settings.json
-    settings.local.json
-    .mcp.json
-    Rules/
-    Agents/
-    Memory/
-      MEMORY.md
-      debugging.md
-  project-name-2/
-    ...
-External
-  .gitconfig
-  VS Code settings.json
-  SSH keys/
-  Environment variables
-```
-
-## Fazy implementacji
-
-### Faza 1: Scanner + TreeView + odczyt (MVP)
-
-1. `discovery.py` - skanowanie sciezek, wykrywanie plikow
-2. `resource.py` - dataclass z polami: path, type (settings/memory/rules/skills/hooks/mcp/agents), scope (managed/user/project/local), content, last_modified
-3. `indexer.py` - budowanie drzewa z wykrytych zasobow
-4. `main_window.py` - QMainWindow z QSplitter (tree | editor)
-5. `tree_panel.py` - QTreeView z QStandardItemModel
-6. `editor_panel.py` - QPlainTextEdit (prosty, bez QScintilla) z read-only wyswietlaniem
-7. `main.py` - entry point
-
-**Cel:** Uruchomienie okna, zobaczenie drzewa zasobow, klikniecie = podglad tresci.
-
-### Faza 2: Edycja + podswietlanie
-
-1. Zamiana QPlainTextEdit na QScintilla
-2. Podswietlanie Markdown i JSON
-3. Zapis zmian (Ctrl+S)
-4. Taby w edytorze (wiele otwartych plikow)
-5. Walidacja JSON przed zapisem
-
-### Faza 3: Wizualny konfigurator hookow i MCP
-
-1. Formularzowy edytor hookow (wybor eventu, matcher, komenda)
-2. Formularzowy edytor MCP servers (nazwa, type, command, args, env)
-3. Drag & drop priorytety
-
-### Faza 4: Merged settings + diff
-
-1. Preview panel - wynik mergeowania ustawien ze wszystkich scope'ow
-2. Diff view - porownanie miedzy scope'ami (np. user vs project)
-3. Kolorowanie zrodel (ktore ustawienie z ktorego scope'u)
-
-### Faza 5: File watching + .exe
-
-1. `file_watcher.py` - watchdog observer na wszystkich skanowanych sciezkach
-2. Auto-refresh drzewa i edytora przy zmianach zewnetrznych
-3. PyInstaller spec + pakowanie do .exe
-4. Ikona w tray (opcjonalnie)
+- `F5` - Refresh (zasoby + historia)
+- `Ctrl+Q` - Quit
+- `Ctrl+1` - Tab Resources
+- `Ctrl+2` - Tab History
+- `View > Expand All / Collapse All`
 
 ## Bezpieczenstwo
 
 - **Credentials masking:** `.credentials.json` wyswietlany z zamaskowanymi wartosciami (np. `sk-ant-...****`). Edycja wymaga odblokowania.
 - **Managed = read-only:** Pliki z `C:\Program Files\ClaudeCode\` sa zawsze read-only w edytorze.
-- **Backup przed zapisem:** Przed kazda edycja tworz kopie `.bak` pliku.
+- **Backup przed zapisem:** Przed kazda edycja tworz kopie `.bak` pliku. (do implementacji w fazie 2)
 - **SSH keys:** Tylko wyswietlanie nazw plikow, NIE tresci kluczy prywatnych.
 
 ## Zasady kodowania
@@ -276,6 +290,7 @@ External
 - Brak hardkodowanych sciezek - wszystko przez `paths.py` utility
 - Testy pytest dla scanner, parsers, models
 - Kazdy modul niezalezny (loose coupling)
+- Ciemny motyw (VS Code style) definiowany w `main.py` stylesheet
 
 ## Zmienne srodowiskowe Claude Code
 
@@ -294,9 +309,12 @@ Do wyswietlenia w sekcji "External":
 
 ## Uwagi implementacyjne
 
-- Na Windows `~` to `C:\Users\SĹ‚awek` - uzywaj `Path.home()`
+- Na Windows `~` to `C:\Users\Slawek` - uzywaj `Path.home()`
 - Hash projektu w `~/.claude/projects/<hash>/` - skanuj caly katalog `projects/`, nie probuj odgadywac hashy
+- Dekodowanie hashy: `_encode_name()` w discovery.py zamienia nie-alnum (bez `-`) na `-`, potem `_walk_resolve()` porownuje z zawartoscia katalogow
 - Pliki `.local.json` i `CLAUDE.local.md` moga nie istniec - to normalne
 - `rules/` i `skills/` moga byc puste lub nie istniec
 - Frontmatter YAML w plikach .md zaczyna sie od `---` na poczatku pliku
 - `@sciezka/do/pliku` w CLAUDE.md to import (do 5 poziomow rekursji) - wyswietl jako link
+- Projekty usiniete z dysku (20 z 49) wyswietlane sa na szaro z opcja relokacji
+- `relocations.json` przechowuje mapowania starych sciezek na nowe
