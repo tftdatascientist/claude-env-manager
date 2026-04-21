@@ -40,6 +40,11 @@ try:
 except ImportError as _iso_err:
     print(f"[ISO] zakładka wyłączona: {_iso_err}", file=_sys.stderr)
     IsoPanel = None
+try:
+    from ingest.ui_panel import IngestPanel  # type: ignore
+except ImportError as _ingest_err:
+    print(f"[Ingest] zakładka wyłączona: {_ingest_err}", file=_sys.stderr)
+    IngestPanel = None
 
 
 class MainWindow(QMainWindow):
@@ -84,6 +89,8 @@ class MainWindow(QMainWindow):
             view_menu.addAction("CO&A (BB)", lambda: self._tabs.setCurrentIndex(7), "Ctrl+8")
         if IsoPanel is not None:
             view_menu.addAction("&ISO (BB)", lambda: self._tabs.setCurrentIndex(8), "Ctrl+9")
+        if IngestPanel is not None:
+            view_menu.addAction("I&ngest (BB)", lambda: self._tabs.setCurrentIndex(9), "Ctrl+0")
         if show_startup_factoid is not None:
             view_menu.addAction("CZ&Y wiesz że…", self._show_czy_factoid)
         view_menu.addSeparator()
@@ -117,6 +124,7 @@ class MainWindow(QMainWindow):
         self._projektant_panel = ProjectantPanel()
         self._coa_panel = CoaPanel() if CoaPanel is not None else None
         self._iso_panel = IsoPanel() if IsoPanel is not None else None
+        self._ingest_panel = IngestPanel() if IngestPanel is not None else None
 
         # Right side: tabs
         self._tabs = QTabWidget()
@@ -131,6 +139,8 @@ class MainWindow(QMainWindow):
             self._tabs.addTab(self._coa_panel, "COA (BB)")
         if self._iso_panel is not None:
             self._tabs.addTab(self._iso_panel, "ISO (BB)")
+        if self._ingest_panel is not None:
+            self._tabs.addTab(self._ingest_panel, "Ingest (BB)")
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._tree_panel)
