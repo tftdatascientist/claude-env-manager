@@ -85,16 +85,19 @@ class MainWindow(QMainWindow):
         view_menu.addAction("&Hidden", lambda: self._tabs.setCurrentIndex(4), "Ctrl+5")
         view_menu.addAction("&Simulator", lambda: self._tabs.setCurrentIndex(5), "Ctrl+6")
         view_menu.addAction("Pro&jektant", lambda: self._tabs.setCurrentIndex(6), "Ctrl+7")
-        if CoaPanel is not None:
-            view_menu.addAction("CO&A (BB)", lambda: self._tabs.setCurrentIndex(7), "Ctrl+8")
-        if IsoPanel is not None:
-            view_menu.addAction("&ISO (BB)", lambda: self._tabs.setCurrentIndex(8), "Ctrl+9")
-        if IngestPanel is not None:
-            view_menu.addAction("I&ngest (BB)", lambda: self._tabs.setCurrentIndex(9), "Ctrl+0")
-        if show_startup_factoid is not None:
-            view_menu.addAction("CZ&Y wiesz że…", self._show_czy_factoid)
         view_menu.addSeparator()
         view_menu.addAction("Reset category &colors", self._reset_colors)
+
+        bb_menu = menu_bar.addMenu("&Claude Code")
+        if CoaPanel is not None:
+            bb_menu.addAction("&COA — Konsultant", lambda: self._tabs.setCurrentIndex(7), "Ctrl+8")
+        if IsoPanel is not None:
+            bb_menu.addAction("&ISO — Walidator", lambda: self._tabs.setCurrentIndex(8), "Ctrl+9")
+        if IngestPanel is not None:
+            bb_menu.addAction("&Ingest — Dodaj do vaultu", lambda: self._tabs.setCurrentIndex(9), "Ctrl+0")
+        if show_startup_factoid is not None:
+            bb_menu.addSeparator()
+            bb_menu.addAction("CZ&Y wiesz że…", self._show_czy_factoid)
 
         tools_menu = menu_bar.addMenu("&Tools")
         cc_panel_menu = tools_menu.addMenu("&cc-panel")
