@@ -45,6 +45,11 @@ try:
 except ImportError as _ingest_err:
     print(f"[Ingest] zakładka wyłączona: {_ingest_err}", file=_sys.stderr)
     IngestPanel = None
+try:
+    from wiki.ui_panel import WikiPanel  # type: ignore
+except ImportError as _wiki_err:
+    print(f"[Wiki] zakładka wyłączona: {_wiki_err}", file=_sys.stderr)
+    WikiPanel = None
 
 
 class MainWindow(QMainWindow):
@@ -95,6 +100,8 @@ class MainWindow(QMainWindow):
             bb_menu.addAction("&ISO — Walidator", lambda: self._tabs.setCurrentIndex(8), "Ctrl+9")
         if IngestPanel is not None:
             bb_menu.addAction("&Ingest — Dodaj do vaultu", lambda: self._tabs.setCurrentIndex(9), "Ctrl+0")
+        if WikiPanel is not None:
+            bb_menu.addAction("&Wiki — Przeglądarka", lambda: self._tabs.setCurrentIndex(10), "Ctrl+W")
         if show_startup_factoid is not None:
             bb_menu.addSeparator()
             bb_menu.addAction("CZ&Y wiesz że…", self._show_czy_factoid)
@@ -128,6 +135,7 @@ class MainWindow(QMainWindow):
         self._coa_panel = CoaPanel() if CoaPanel is not None else None
         self._iso_panel = IsoPanel() if IsoPanel is not None else None
         self._ingest_panel = IngestPanel() if IngestPanel is not None else None
+        self._wiki_panel = WikiPanel() if WikiPanel is not None else None
 
         # Right side: tabs
         self._tabs = QTabWidget()
@@ -144,6 +152,8 @@ class MainWindow(QMainWindow):
             self._tabs.addTab(self._iso_panel, "ISO (BB)")
         if self._ingest_panel is not None:
             self._tabs.addTab(self._ingest_panel, "Ingest (BB)")
+        if self._wiki_panel is not None:
+            self._tabs.addTab(self._wiki_panel, "Wiki (BB)")
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._tree_panel)
