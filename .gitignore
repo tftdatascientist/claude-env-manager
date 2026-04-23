@@ -1,5 +1,7 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
 .venv/
 *.egg-info/
 dist/
@@ -7,3 +9,30 @@ build/
 *.spec
 *.bak
 .env
+
+# Narzędzia IDE
+.vscode/
+.pytest_cache/
+
+# Podprojekty izolowane (własne repo/kontekst)
+BB/
+VS_CLAUDE/
+ccnsr/
+
+# Projektant — może być osobnym repo
+project/
+
+# Dane lokalne (per-user, nie commitować)
+active_projects.json
+aliases.json
+hidden_projects.json
+project_groups.json
+relocations.json
+website_projects.json
+
+# Pliki tymczasowe / binaria
+vs4tfiles.zip
+*.lnk
+
+# Claude Code context (prywatny)
+.claude/

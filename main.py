@@ -65,8 +65,15 @@ def main() -> None:
             color: #cccccc;
         }
         QSplitter::handle {
-            background-color: #333333;
-            width: 2px;
+            background-color: #3c3c3c;
+            width: 5px;
+            margin: 0 1px;
+        }
+        QSplitter::handle:hover {
+            background-color: #007acc;
+        }
+        QSplitter::handle:pressed {
+            background-color: #005f9e;
         }
         QMessageBox {
             background-color: #252526;

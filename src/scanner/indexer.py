@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from src.models.project import Project
 from src.models.resource import Resource, ResourceScope, ResourceType
+from src.utils.aliases import load_aliases
 
 
 @dataclass
@@ -87,12 +88,14 @@ def build_tree(
 
     # Projects
     if projects:
+        aliases = load_aliases()
         projects_node = TreeNode(label=f"Projects ({len(projects)})")
         for project in projects:
             session_info = f" [{project.session_count}s]" if project.session_count else ""
+            display_name = aliases.get(str(project.root_path), project.name)
 
             # Build project info content
-            lines = [f"Project: {project.name}"]
+            lines = [f"Project: {display_name}"]
             lines.append(f"Path: {project.root_path}")
             lines.append(f"Sessions: {project.session_count}")
             lines.append(f"Resources: {len(project.resources)}")
@@ -105,13 +108,13 @@ def build_tree(
                 path=project.root_path,
                 resource_type=ResourceType.PROJECT_INFO,
                 scope=ResourceScope.PROJECT,
-                display_name=project.name,
+                display_name=display_name,
                 content="\n".join(lines),
                 read_only=True,
             )
 
             proj_node = TreeNode(
-                label=f"{project.name}{session_info}",
+                label=f"{display_name}{session_info}",
                 resource=info_resource,
             )
             if project.resources:

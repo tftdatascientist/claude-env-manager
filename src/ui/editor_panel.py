@@ -84,6 +84,116 @@ class EditorPanel(QWidget):
 
         self._editor.setPlainText(content)
 
+    def show_project_detail(self, proj: dict) -> None:
+        """Display detailed info about a project from the All Projects list."""
+        from datetime import datetime
+
+        name = proj["display_name"]
+        num = proj["number"]
+        self._header.setText(f"PROJECT #{num}: {name}")
+        self._header.setStyleSheet(
+            "padding: 4px; background-color: #2d2d2d; color: #ccc; font-size: 11px;"
+        )
+
+        birth_str = datetime.fromtimestamp(proj["birth_ts"]).strftime("%Y-%m-%d %H:%M:%S")
+        hash_dir = proj["hash_dir"]
+
+        lines = [
+            f"Project #{num}: {name}",
+            f"{'=' * 60}",
+            "",
+            f"Resolved path:  {proj['resolved_path'] or '(unresolved)'}",
+            f"Status:         {'EXISTS' if proj['exists'] else 'NOT FOUND (orphaned)'}",
+            f"Hash dir:       {hash_dir}",
+            f"Created:        {birth_str}",
+            "",
+            f"Sessions:       {proj['session_count']}",
+            f"Memory files:   {proj['memory_count']}",
+        ]
+
+        if proj["agent_memory_count"]:
+            lines.append(f"Agent memory:   {proj['agent_memory_count']}")
+
+        if proj["total_log_size"]:
+            size_mb = proj["total_log_size"] / (1024 * 1024)
+            lines.append(f"Log size:       {size_mb:.1f} MB")
+
+        # List memory files
+        memory_files = proj.get("memory_files", [])
+        if memory_files:
+            lines.append("")
+            lines.append("Memory files:")
+            lines.append("-" * 40)
+            for mf in memory_files:
+                lines.append(f"  {mf.name}")
+                try:
+                    content = mf.read_text(encoding="utf-8", errors="replace")
+                    # Show first 3 lines of each memory file
+                    preview = content.strip().split("\n")[:3]
+                    for pl in preview:
+                        lines.append(f"    {pl}")
+                    if len(content.strip().split("\n")) > 3:
+                        lines.append(f"    ...")
+                    lines.append("")
+                except OSError:
+                    lines.append("    [unreadable]")
+                    lines.append("")
+
+        # List session files
+        session_files = proj.get("session_files", [])
+        if session_files:
+            lines.append("")
+            lines.append("Session logs:")
+            lines.append("-" * 40)
+            # Sort by modification time, newest first
+            sorted_sessions = sorted(session_files, key=lambda f: f.stat().st_mtime, reverse=True)
+            for sf in sorted_sessions:
+                try:
+                    stat = sf.stat()
+                    size_kb = stat.st_size / 1024
+                    mod_str = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    lines.append(f"  {sf.stem}  ({size_kb:.0f} KB, {mod_str})")
+                except OSError:
+                    lines.append(f"  {sf.stem}  [stat error]")
+
+        self._editor.setPlainText("\n".join(lines))
+        self._current_resource = None
+
+    def show_welcome(self, managed: int, user: int, projects: int, external: int) -> None:
+        """Display a welcome/summary screen with resource counts."""
+        total = managed + user + projects + external
+        self._header.setText("Claude Environment Manager")
+        self._header.setStyleSheet(
+            "padding: 4px; background-color: #2d2d2d; color: #ccc; font-size: 11px;"
+        )
+
+        lines = [
+            "Claude Environment Manager",
+            "=" * 50,
+            "",
+            f"Scanned resources: {total}",
+            "",
+            f"  Managed (read-only): {managed}",
+            f"  User-level:          {user}",
+            f"  Projects:            {projects}",
+            f"  External:            {external}",
+            "",
+            "-" * 50,
+            "Select a resource from the tree on the left",
+            "to view its content here.",
+            "",
+            "Tree view:",
+            "  • Click any file to open it",
+            "  • Right-click for context menu (Explorer, VS Code, ...)",
+            "  • Use the combo above the tree to switch to 'All Projects'",
+            "",
+            "Keyboard shortcuts:",
+            "  Ctrl+1 .. Ctrl+6  — switch tabs",
+            "  F5                — refresh all",
+        ]
+        self._editor.setPlainText("\n".join(lines))
+        self._current_resource = None
+
     def clear(self) -> None:
         self._editor.clear()
         self._header.setText("Select a resource from the tree")
