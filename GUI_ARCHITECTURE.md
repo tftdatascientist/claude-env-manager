@@ -12,7 +12,7 @@ Dokument referencyjny opisujacy interfejs graficzny aplikacji. Sluzy jako specyf
 
 ```
 +-----------------------------------------------------------+
-|  Menu: File | View | Help                                  |
+|  Menu: File | View | Claude Code | Websites | Web_Dev | Tools | Help  |
 +----------------+------------------------------------------+
 |                | [Resources][History][Active][Web][Hidden]  |
 |   TreePanel    |                                           |
@@ -47,8 +47,23 @@ Dokument referencyjny opisujacy interfejs graficzny aplikacji. Sluzy jako specyf
 MainWindow (QMainWindow, 1400x800, min 1000x600)
  ├── MenuBar
  │    ├── File: Refresh (F5), Quit (Ctrl+Q)
- │    ├── View: Expand All, Collapse All, Resources (Ctrl+1), History (Ctrl+2),
- │    │         Active Projects (Ctrl+3), Websites (Ctrl+4), Hidden (Ctrl+5), Reset colors
+ │    ├── View: Expand All, Collapse All, Resources (Ctrl+1), Projects (Ctrl+2),
+ │    │         Active Projects (Ctrl+3), Websites (Ctrl+4), Hidden (Ctrl+5),
+ │    │         Simulator (Ctrl+6), Projektant (Ctrl+7), Sesje CC (Ctrl+8),
+ │    │         Reset category colors
+ │    ├── Claude Code: COA — Konsultant (Ctrl+9)*, ISO — Walidator (Ctrl+0)*,
+ │    │               Ingest — Dodaj do vaultu (Ctrl+W)*, Wiki — Przeglądarka (Ctrl+Shift+W)*,
+ │    │               CZY wiesz że…*   (* = widoczne tylko jeśli moduł BB dostępny)
+ │    ├── Websites: Strony (główny ekran WMS) (Ctrl+Shift+M),
+ │    │             ---, Szablony, Zakładki, Portfolio,
+ │    │             ---, Audit, Sync Notion
+ │    │             [każda pozycja uruchamia WMS i otwiera odpowiedni panel]
+ │    ├── Web_Dev: Editor,
+ │    │            ---, Etap 0 — Brief, Etap 1 — WCS Init
+ │    │            [każda pozycja uruchamia WMS i otwiera odpowiedni dialog]
+ │    ├── Tools: cc-panel > Ustaw folder projektu…, Edytuj listy dropdown…
+ │    │          ---, TOST — Token Monitor > Monitor, Simulator, Duel, Trainer,
+ │    │                                      ---, Notion Sync Continuous, Notion Sync Once
  │    └── Help: About
  ├── QSplitter (Horizontal, proporcje 1:3, rozmiary 300:900)
  │    ├── TreePanel (QWidget)

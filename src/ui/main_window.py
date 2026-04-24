@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QMainWindow, QSplitter, QMessageBox, QTabWidget,
+    QMainWindow, QSplitter, QMessageBox, QStackedWidget,
 )
 
 from src.models.resource import Resource
@@ -19,6 +19,7 @@ from src.ui.hidden_projects_panel import HiddenProjectsPanel
 from src.ui.status_bar import StatusBar
 from src.ui.simulator.simulator_panel import SimulatorPanel
 from src.ui.projektant_panel import ProjectantPanel
+from src.ui.cc_launcher_panel import CCLauncherPanel
 
 import sys as _sys
 from pathlib import Path as _Path
@@ -71,6 +72,20 @@ class MainWindow(QMainWindow):
             except Exception as _czy_exc:
                 print(f"[CZY] start widget failed: {_czy_exc}", file=_sys.stderr)
 
+    # Page indices in QStackedWidget
+    _PAGE_RESOURCES = 0
+    _PAGE_PROJECTS = 1
+    _PAGE_ACTIVE_PROJECTS = 2
+    _PAGE_WEBSITES = 3
+    _PAGE_HIDDEN = 4
+    _PAGE_SIMULATOR = 5
+    _PAGE_PROJEKTANT = 6
+    _PAGE_SESJE_CC = 7
+    # BB panels start at 8 (dynamic, assigned in _setup_ui)
+
+    def _show_page(self, index: int) -> None:
+        self._stack.setCurrentIndex(index)
+
     def _setup_menu(self) -> None:
         menu_bar = self.menuBar()
 
@@ -79,34 +94,49 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("&Quit", self.close, "Ctrl+Q")
 
-        view_menu = menu_bar.addMenu("&View")
-        view_menu.addAction("Expand &All", self._expand_all)
-        view_menu.addAction("&Collapse All", self._collapse_all)
-        view_menu.addSeparator()
-        view_menu.addAction("&Resources", lambda: self._tabs.setCurrentIndex(0), "Ctrl+1")
-        view_menu.addAction("&Projects", lambda: self._tabs.setCurrentIndex(1), "Ctrl+2")
-        view_menu.addAction("&Active Projects", lambda: self._tabs.setCurrentIndex(2), "Ctrl+3")
-        view_menu.addAction("&Websites", lambda: self._tabs.setCurrentIndex(3), "Ctrl+4")
-        view_menu.addAction("&Hidden", lambda: self._tabs.setCurrentIndex(4), "Ctrl+5")
-        view_menu.addAction("&Simulator", lambda: self._tabs.setCurrentIndex(5), "Ctrl+6")
-        view_menu.addAction("Pro&jektant", lambda: self._tabs.setCurrentIndex(6), "Ctrl+7")
-        view_menu.addSeparator()
-        view_menu.addAction("Reset category &colors", self._reset_colors)
+        projekty_menu = menu_bar.addMenu("&Projekty")
+        projekty_menu.addAction("&Resources", lambda: self._show_page(self._PAGE_RESOURCES), "Ctrl+1")
+        projekty_menu.addAction("&Projects", lambda: self._show_page(self._PAGE_PROJECTS), "Ctrl+2")
+        projekty_menu.addAction("&Active Projects", lambda: self._show_page(self._PAGE_ACTIVE_PROJECTS), "Ctrl+3")
+        projekty_menu.addAction("&All Projects", lambda: self._show_page(self._PAGE_PROJECTS), "Ctrl+4")
+        projekty_menu.addAction("&Hidden", lambda: self._show_page(self._PAGE_HIDDEN), "Ctrl+5")
+
+        develop_menu = menu_bar.addMenu("&Develop")
+        develop_menu.addAction("Pro&jektant", lambda: self._show_page(self._PAGE_PROJEKTANT), "Ctrl+7")
+        develop_menu.addAction("&Sesje CC", lambda: self._show_page(self._PAGE_SESJE_CC), "Ctrl+8")
 
         bb_menu = menu_bar.addMenu("&Claude Code")
         if CoaPanel is not None:
-            bb_menu.addAction("&COA — Konsultant", lambda: self._tabs.setCurrentIndex(7), "Ctrl+8")
+            bb_menu.addAction("&COA — Konsultant", lambda: self._show_page(self._bb_page_coa), "Ctrl+9")
         if IsoPanel is not None:
-            bb_menu.addAction("&ISO — Walidator", lambda: self._tabs.setCurrentIndex(8), "Ctrl+9")
+            bb_menu.addAction("&ISO — Walidator", lambda: self._show_page(self._bb_page_iso), "Ctrl+0")
         if IngestPanel is not None:
-            bb_menu.addAction("&Ingest — Dodaj do vaultu", lambda: self._tabs.setCurrentIndex(9), "Ctrl+0")
+            bb_menu.addAction("&Ingest — Dodaj do vaultu", lambda: self._show_page(self._bb_page_ingest), "Ctrl+W")
         if WikiPanel is not None:
-            bb_menu.addAction("&Wiki — Przeglądarka", lambda: self._tabs.setCurrentIndex(10), "Ctrl+W")
+            bb_menu.addAction("&Wiki — Przeglądarka", lambda: self._show_page(self._bb_page_wiki), "Ctrl+Shift+W")
         if show_startup_factoid is not None:
             bb_menu.addSeparator()
             bb_menu.addAction("CZ&Y wiesz że…", self._show_czy_factoid)
 
+        websites_menu = menu_bar.addMenu("&Websites")
+        websites_menu.addAction("&Strony (główny ekran)", self._launch_wms, "Ctrl+Shift+M")
+        websites_menu.addSeparator()
+        websites_menu.addAction("&Szablony", lambda: self._launch_wms_panel("szablony"))
+        websites_menu.addAction("&Zakładki", lambda: self._launch_wms_panel("zakładki"))
+        websites_menu.addAction("&Portfolio", lambda: self._launch_wms_panel("portfolio"))
+        websites_menu.addSeparator()
+        websites_menu.addAction("&Audit", lambda: self._launch_wms_panel("audit"))
+        websites_menu.addAction("Sy&nc Notion", lambda: self._launch_wms_panel("sync"))
+
+        webdev_menu = menu_bar.addMenu("&Web_Dev")
+        webdev_menu.addAction("&Editor", lambda: self._launch_wms_panel("editor"))
+        webdev_menu.addSeparator()
+        webdev_menu.addAction("Etap &0 — Brief", lambda: self._launch_wms_panel("brief"))
+        webdev_menu.addAction("Etap &1 — WCS Init", lambda: self._launch_wms_panel("etap1"))
+
         tools_menu = menu_bar.addMenu("&Tools")
+        tools_menu.addAction("&Simulator", lambda: self._show_page(self._PAGE_SIMULATOR), "Ctrl+6")
+        tools_menu.addSeparator()
         cc_panel_menu = tools_menu.addMenu("&cc-panel")
         cc_panel_menu.addAction("Ustaw folder &projektu…", self._cc_panel_set_project_folder)
         cc_panel_menu.addAction("&Edytuj listy dropdown…", self._cc_panel_show_settings)
@@ -120,6 +150,12 @@ class MainWindow(QMainWindow):
         tost_menu.addAction("Notion Sync — &Continuous", self._tost_notion_sync)
         tost_menu.addAction("Notion Sync — &Once", self._tost_notion_sync_once)
 
+        view_menu = menu_bar.addMenu("&View")
+        view_menu.addAction("Expand &All", self._expand_all)
+        view_menu.addAction("&Collapse All", self._collapse_all)
+        view_menu.addSeparator()
+        view_menu.addAction("Reset category &colors", self._reset_colors)
+
         help_menu = menu_bar.addMenu("&Help")
         help_menu.addAction("&About", self._show_about)
 
@@ -132,39 +168,53 @@ class MainWindow(QMainWindow):
         self._hidden_projects_panel = HiddenProjectsPanel()
         self._simulator_panel = SimulatorPanel()
         self._projektant_panel = ProjectantPanel()
+        self._cc_launcher_panel = CCLauncherPanel()
         self._coa_panel = CoaPanel() if CoaPanel is not None else None
         self._iso_panel = IsoPanel() if IsoPanel is not None else None
         self._ingest_panel = IngestPanel() if IngestPanel is not None else None
         self._wiki_panel = WikiPanel() if WikiPanel is not None else None
 
-        # Right side: tabs
-        self._tabs = QTabWidget()
-        self._tabs.addTab(self._editor_panel, "Resources")
-        self._tabs.addTab(self._history_panel, "Projects")
-        self._tabs.addTab(self._active_projects_panel, "Active Projects")
-        self._tabs.addTab(self._website_projects_panel, "Websites")
-        self._tabs.addTab(self._hidden_projects_panel, "Hidden")
-        self._tabs.addTab(self._simulator_panel, "Simulator")
-        self._tabs.addTab(self._projektant_panel, "Projektant")
-        if self._coa_panel is not None:
-            self._tabs.addTab(self._coa_panel, "COA (BB)")
-        if self._iso_panel is not None:
-            self._tabs.addTab(self._iso_panel, "ISO (BB)")
-        if self._ingest_panel is not None:
-            self._tabs.addTab(self._ingest_panel, "Ingest (BB)")
-        if self._wiki_panel is not None:
-            self._tabs.addTab(self._wiki_panel, "Wiki (BB)")
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._tree_panel)
-        splitter.addWidget(self._tabs)
-        splitter.setSizes([300, 1100])
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
+        # PAGE_RESOURCES: tree + editor split (full width)
+        self._resources_split = QSplitter(Qt.Orientation.Horizontal)
+        self._resources_split.addWidget(self._tree_panel)
+        self._resources_split.addWidget(self._editor_panel)
+        self._resources_split.setSizes([300, 1100])
+        self._resources_split.setCollapsible(0, False)
+        self._resources_split.setCollapsible(1, False)
         self._tree_panel.setMinimumWidth(150)
-        self._tabs.setMinimumWidth(400)
+        self._editor_panel.setMinimumWidth(400)
 
-        self.setCentralWidget(splitter)
+        # Stacked widget — no tab bar, menu-driven navigation
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._resources_split)          # 0 = Resources
+        self._stack.addWidget(self._history_panel)            # 1 = Projects
+        self._stack.addWidget(self._active_projects_panel)    # 2 = Active Projects
+        self._stack.addWidget(self._website_projects_panel)   # 3 = Websites
+        self._stack.addWidget(self._hidden_projects_panel)    # 4 = Hidden
+        self._stack.addWidget(self._simulator_panel)          # 5 = Simulator
+        self._stack.addWidget(self._projektant_panel)         # 6 = Projektant
+        self._stack.addWidget(self._cc_launcher_panel)        # 7 = Sesje CC
+
+        # BB panels — track indices dynamically starting at 8
+        bb_idx = 8
+        self._bb_page_coa = -1
+        self._bb_page_iso = -1
+        self._bb_page_ingest = -1
+        self._bb_page_wiki = -1
+        if self._coa_panel is not None:
+            self._stack.addWidget(self._coa_panel)
+            self._bb_page_coa = bb_idx; bb_idx += 1
+        if self._iso_panel is not None:
+            self._stack.addWidget(self._iso_panel)
+            self._bb_page_iso = bb_idx; bb_idx += 1
+        if self._ingest_panel is not None:
+            self._stack.addWidget(self._ingest_panel)
+            self._bb_page_ingest = bb_idx; bb_idx += 1
+        if self._wiki_panel is not None:
+            self._stack.addWidget(self._wiki_panel)
+            self._bb_page_wiki = bb_idx; bb_idx += 1
+
+        self.setCentralWidget(self._stack)
 
         self._status_bar = StatusBar()
         self.setStatusBar(self._status_bar)
@@ -215,13 +265,13 @@ class MainWindow(QMainWindow):
 
     def _on_resource_selected(self, resource: Resource) -> None:
         """Handle resource selection from tree."""
-        self._tabs.setCurrentIndex(0)
+        self._show_page(self._PAGE_RESOURCES)
         self._editor_panel.show_resource(resource)
         self._status_bar.show_resource_info(resource)
 
     def _on_project_detail(self, proj: dict) -> None:
         """Handle project selection from All Projects list."""
-        self._tabs.setCurrentIndex(0)
+        self._show_page(self._PAGE_RESOURCES)
         self._editor_panel.show_project_detail(proj)
 
     def _expand_all(self) -> None:
@@ -244,6 +294,40 @@ class MainWindow(QMainWindow):
             self._czy_dialog = show_startup_factoid(parent=self)
         except Exception as _exc:
             print(f"[CZY] show failed: {_exc}", file=_sys.stderr)
+
+    # --- WMS launcher ---
+
+    def _launch_wms(self) -> None:
+        from src.utils.wms import is_wms_installed, launch_wms
+        if not is_wms_installed():
+            QMessageBox.warning(
+                self, "WMS",
+                "WMS nie jest zainstalowany lub venv nie istnieje.\n\n"
+                "Oczekiwana lokalizacja:\n"
+                "~/Documents/.MD/PARA/SER/CLAUDE CODE/WMS/.venv/",
+            )
+            return
+        proc = launch_wms()
+        if proc is None:
+            QMessageBox.critical(self, "WMS", "Nie udało się uruchomić WMS.")
+        else:
+            self._status_bar.set_status(f"WMS uruchomiony (PID {proc.pid})")
+
+    def _launch_wms_panel(self, panel: str) -> None:
+        from src.utils.wms import is_wms_installed, launch_wms_panel
+        if not is_wms_installed():
+            QMessageBox.warning(
+                self, "WMS",
+                "WMS nie jest zainstalowany lub venv nie istnieje.\n\n"
+                "Oczekiwana lokalizacja:\n"
+                "~/Documents/.MD/PARA/SER/CLAUDE CODE/WMS/.venv/",
+            )
+            return
+        proc = launch_wms_panel(panel)
+        if proc is None:
+            QMessageBox.critical(self, "WMS", f"Nie udało się uruchomić WMS ({panel}).")
+        else:
+            self._status_bar.set_status(f"WMS [{panel}] uruchomiony (PID {proc.pid})")
 
     # --- TOST launchers ---
 
