@@ -60,6 +60,7 @@ from src.projektant.template_parser import (
     read_section,
 )
 from src.utils.plan_parser import PlanData, get_section, read_plan, write_plan
+from src.ui.zadania_panel import ZadaniaPanel as _ZadaniaPanel
 from src.workflow import WorkflowRunner
 from src.watchers.session_watcher import (
     SessionWatcher,
@@ -368,6 +369,7 @@ class ProjectSlotWidget(QWidget):
 
         self._tabs.addTab(self._build_dane(), "Dane")
         self._tabs.addTab(self._build_plan(), "ZADANIA")
+        self._tabs.addTab(self._build_zadaniowiec(), "ZADANIOWIEC")
         self._tabs.addTab(self._build_pcc(), "PLAN.md")
         self._tabs.addTab(self._build_md_file("CLAUDE.md"), "CLAUDE.md")
         self._tabs.addTab(self._build_md_file("ARCHITECTURE.md"), "ARCHITECTURE.md")
@@ -545,6 +547,13 @@ class ProjectSlotWidget(QWidget):
 
         lay.addWidget(splitter, stretch=1)
         return w
+
+    # ---- ZADANIOWIEC --------------------------------------------------- #
+
+    def _build_zadaniowiec(self) -> QWidget:
+        """Osadzony ZadaniaPanel — ładuje projekt slotu automatycznie."""
+        self._zadaniowiec = _ZadaniaPanel()
+        return self._zadaniowiec
 
     # ---- CLAUDE.md / ARCHITECTURE.md / CONVENTIONS.md ----------------- #
 
@@ -1085,6 +1094,11 @@ class ProjectSlotWidget(QWidget):
         self._lbl_plan_path.setText(str(Path(path) / "PLAN.md"))
         self._render_plan()
 
+    def reload_zadaniowiec(self) -> None:
+        path = self._path_edit.toPlainText().strip()
+        if path:
+            self._zadaniowiec.load_from_project(path)
+
     def reload_pcc(self) -> None:
         path = self._path_edit.toPlainText().strip()
         plan_path = Path(path) / "PLAN.md" if path else None
@@ -1217,6 +1231,7 @@ class ProjectSlotWidget(QWidget):
             self.reload_stats()
             self.reload_history()
             self.reload_md_files()
+            self.reload_zadaniowiec()
 
     def _on_config_changed(self) -> None:
         self._save_timer.start(800)
@@ -1243,6 +1258,7 @@ class ProjectSlotWidget(QWidget):
             self.reload_stats()
             self.reload_history()
             self.reload_md_files()
+            self.reload_zadaniowiec()
 
     def _on_plan_save(self) -> None:
         path = self._path_edit.toPlainText().strip()
