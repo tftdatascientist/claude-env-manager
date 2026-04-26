@@ -320,6 +320,7 @@ class ProjectSlotWidget(QWidget):
         self._save_timer.timeout.connect(self._on_debounce)
 
         self._stop_pending = False
+        self._zadaniowiec_loaded = False
         self._workflow = WorkflowRunner(parent=self)
         self._workflow.operation_done.connect(self._on_workflow_done)
 
@@ -1065,7 +1066,8 @@ class ProjectSlotWidget(QWidget):
         self._plan_editor.textChanged.connect(lambda: self._btn_plan_save.setEnabled(True))
 
     def _on_tab_changed(self, index: int) -> None:
-        if index == self._TAB_ZADANIOWIEC:
+        if index == self._TAB_ZADANIOWIEC and not self._zadaniowiec_loaded:
+            self._zadaniowiec_loaded = True
             self.reload_zadaniowiec()
 
     # ------------------------------------------------------------------ #
@@ -1258,13 +1260,16 @@ class ProjectSlotWidget(QWidget):
             self._path_edit.toPlainText().strip() or str(Path.home()),
         )
         if folder:
+            self._zadaniowiec_loaded = False
             self._path_edit.setPlainText(folder)
             self.reload_plan()
             self.reload_pcc()
             self.reload_stats()
             self.reload_history()
             self.reload_md_files()
-            self.reload_zadaniowiec()
+            if self._tabs.currentIndex() == self._TAB_ZADANIOWIEC:
+                self._zadaniowiec_loaded = True
+                self.reload_zadaniowiec()
 
     def _on_plan_save(self) -> None:
         path = self._path_edit.toPlainText().strip()

@@ -648,7 +648,9 @@ class ZadaniaPanel(QWidget):
         bottom_tabs.addTab(self._ai_panel, "✦ AI")
 
         splitter.addWidget(bottom_tabs)
-        splitter.setSizes([180, 400])
+        splitter.setSizes([150, 500])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
         root.addWidget(splitter, stretch=1)
 
     def _build_next_tab(self) -> QWidget:
