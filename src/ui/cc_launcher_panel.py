@@ -1038,6 +1038,8 @@ class ProjectSlotWidget(QWidget):
     # Sygnały                                                               #
     # ------------------------------------------------------------------ #
 
+    _TAB_ZADANIOWIEC = 2  # indeks zakładki ZADANIOWIEC w self._tabs
+
     def _connect_signals(self) -> None:
         self._btn_launch.clicked.connect(lambda: self.launch_requested.emit(self._slot_id))
         self._btn_window.clicked.connect(lambda: self.window_requested.emit(self._slot_id))
@@ -1050,6 +1052,7 @@ class ProjectSlotWidget(QWidget):
         self._btn_hist_refresh.clicked.connect(self._refresh_transcript)
         self._btn_stats_refresh.clicked.connect(self.reload_stats)
         self._btn_sesje_refresh.clicked.connect(self.reload_history)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
 
         for sig in (
             self._path_edit.textChanged,
@@ -1060,6 +1063,10 @@ class ProjectSlotWidget(QWidget):
         ):
             sig.connect(self._on_config_changed)
         self._plan_editor.textChanged.connect(lambda: self._btn_plan_save.setEnabled(True))
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index == self._TAB_ZADANIOWIEC:
+            self.reload_zadaniowiec()
 
     # ------------------------------------------------------------------ #
     # Publiczne API                                                         #
@@ -1097,7 +1104,7 @@ class ProjectSlotWidget(QWidget):
     def reload_zadaniowiec(self) -> None:
         path = self._path_edit.toPlainText().strip()
         if path:
-            self._zadaniowiec.load_from_project(path)
+            self._zadaniowiec.load_from_project(path, silent=True)
 
     def reload_pcc(self) -> None:
         path = self._path_edit.toPlainText().strip()
@@ -1231,7 +1238,6 @@ class ProjectSlotWidget(QWidget):
             self.reload_stats()
             self.reload_history()
             self.reload_md_files()
-            self.reload_zadaniowiec()
 
     def _on_config_changed(self) -> None:
         self._save_timer.start(800)

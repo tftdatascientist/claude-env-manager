@@ -701,8 +701,13 @@ class ZadaniaPanel(QWidget):
     # Publiczne API                                                         #
     # ------------------------------------------------------------------ #
 
-    def load_from_project(self, project_path: str | Path) -> None:
-        """Wariant A/B/C — auto-detect DPS, dialog konwersji, wybór pliku."""
+    def load_from_project(self, project_path: str | Path, silent: bool = False) -> None:
+        """Wczytaj projekt. Gdy silent=True — nie pokazuj żadnych dialogów.
+
+        Wariant A (DPS) — ładuje od razu.
+        Wariant B/C — gdy silent=True tylko informuje etykietą; dialog pojawia
+        się dopiero gdy użytkownik kliknie 'Otwórz…' lub wywoła bez silent.
+        """
         project_path = Path(project_path)
         plan_path = project_path / "PLAN.md"
 
@@ -716,13 +721,21 @@ class ZadaniaPanel(QWidget):
                 self._apply_file(plan_path, text)
                 return
 
-            # Plik istnieje, nie jest DPS
+            if silent:
+                self._lbl_path.setText(f"{plan_path}  (nie DPS — kliknij Otwórz…)")
+                self._lbl_path.setStyleSheet(_LBL_WARN)
+                return
+
             dlg = _PlanChoiceDialog(project_path=project_path, existing_md=plan_path, parent=self)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             self._handle_choice(dlg, project_path, original_text=text)
         else:
-            # Brak PLAN.md
+            if silent:
+                self._lbl_path.setText(f"Brak PLAN.md w {project_path}  — kliknij Otwórz…")
+                self._lbl_path.setStyleSheet(_LBL_WARN)
+                return
+
             dlg = _PlanChoiceDialog(project_path=project_path, existing_md=None, parent=self)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return

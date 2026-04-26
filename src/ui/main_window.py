@@ -251,7 +251,7 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         if project_path:
-            self._zadania_panel.load_from_project(project_path)
+            self._zadania_panel.load_from_project(project_path, silent=True)
 
     def _refresh_all(self) -> None:
         """Refresh resources, history, active projects, and websites."""
