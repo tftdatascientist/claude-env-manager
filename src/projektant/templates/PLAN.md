@@ -1,4 +1,4 @@
-<!-- PLAN v1.0 -->
+<!-- PLAN v2.0 -->
 
 ## Meta
 <!-- SECTION:meta -->
@@ -8,11 +8,26 @@
 - updated: 
 <!-- /SECTION:meta -->
 
-## Steps
-<!-- SECTION:steps -->
-- [ ] 
-<!-- /SECTION:steps -->
+## Current
+<!-- SECTION:current -->
+- task: 
+- file: 
+- started: 
+<!-- /SECTION:current -->
 
-## Notes
-<!-- SECTION:notes -->
-<!-- /SECTION:notes -->
+## Next
+<!-- SECTION:next -->
+- [ ] 
+<!-- /SECTION:next -->
+
+## Done
+<!-- SECTION:done -->
+<!-- /SECTION:done -->
+
+## Blockers
+<!-- SECTION:blockers -->
+<!-- /SECTION:blockers -->
+
+## Session Log
+<!-- SECTION:session_log -->
+<!-- /SECTION:session_log -->

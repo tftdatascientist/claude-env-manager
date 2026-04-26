@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QMainWindow, QSplitter, QMessageBox, QStackedWidget,
+    QMainWindow, QMessageBox, QStackedWidget,
 )
 
 from src.models.resource import Resource
 from src.scanner.discovery import discover_all
-from src.scanner.indexer import build_tree
-from src.ui.tree_panel import TreePanel
 from src.ui.editor_panel import EditorPanel
 from src.ui.history_panel import HistoryPanel
 from src.ui.active_projects_panel import ActiveProjectsPanel
@@ -20,6 +18,7 @@ from src.ui.status_bar import StatusBar
 from src.ui.simulator.simulator_panel import SimulatorPanel
 from src.ui.projektant_panel import ProjectantPanel
 from src.ui.cc_launcher_panel import CCLauncherPanel
+from src.ui.zadania_panel import ZadaniaPanel
 
 import sys as _sys
 from pathlib import Path as _Path
@@ -58,12 +57,13 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Claude Environment Manager")
+        self.setWindowTitle("Claude Manager")
         self.setMinimumSize(1000, 600)
         self.resize(1400, 800)
 
         self._setup_menu()
         self._setup_ui()
+        self._show_page(self._PAGE_SESJE_CC)
         self._scan_resources()
         self._czy_dialog = None
         if show_startup_factoid is not None:
@@ -81,10 +81,13 @@ class MainWindow(QMainWindow):
     _PAGE_SIMULATOR = 5
     _PAGE_PROJEKTANT = 6
     _PAGE_SESJE_CC = 7
-    # BB panels start at 8 (dynamic, assigned in _setup_ui)
+    _PAGE_ZADANIA = 8
+    # BB panels start at 9 (dynamic, assigned in _setup_ui)
 
     def _show_page(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
+        if index == self._PAGE_ZADANIA:
+            self._sync_zadania_from_active_slot()
 
     def _setup_menu(self) -> None:
         menu_bar = self.menuBar()
@@ -104,6 +107,7 @@ class MainWindow(QMainWindow):
         develop_menu = menu_bar.addMenu("&Develop")
         develop_menu.addAction("Pro&jektant", lambda: self._show_page(self._PAGE_PROJEKTANT), "Ctrl+7")
         develop_menu.addAction("&Sesje CC", lambda: self._show_page(self._PAGE_SESJE_CC), "Ctrl+8")
+        develop_menu.addAction("&Zadania", lambda: self._show_page(self._PAGE_ZADANIA), "Ctrl+Z")
 
         bb_menu = menu_bar.addMenu("&Claude Code")
         if CoaPanel is not None:
@@ -151,16 +155,12 @@ class MainWindow(QMainWindow):
         tost_menu.addAction("Notion Sync — &Once", self._tost_notion_sync_once)
 
         view_menu = menu_bar.addMenu("&View")
-        view_menu.addAction("Expand &All", self._expand_all)
-        view_menu.addAction("&Collapse All", self._collapse_all)
-        view_menu.addSeparator()
         view_menu.addAction("Reset category &colors", self._reset_colors)
 
         help_menu = menu_bar.addMenu("&Help")
         help_menu.addAction("&About", self._show_about)
 
     def _setup_ui(self) -> None:
-        self._tree_panel = TreePanel()
         self._editor_panel = EditorPanel()
         self._history_panel = HistoryPanel()
         self._active_projects_panel = ActiveProjectsPanel()
@@ -169,24 +169,15 @@ class MainWindow(QMainWindow):
         self._simulator_panel = SimulatorPanel()
         self._projektant_panel = ProjectantPanel()
         self._cc_launcher_panel = CCLauncherPanel()
+        self._zadania_panel = ZadaniaPanel()
         self._coa_panel = CoaPanel() if CoaPanel is not None else None
         self._iso_panel = IsoPanel() if IsoPanel is not None else None
         self._ingest_panel = IngestPanel() if IngestPanel is not None else None
         self._wiki_panel = WikiPanel() if WikiPanel is not None else None
 
-        # PAGE_RESOURCES: tree + editor split (full width)
-        self._resources_split = QSplitter(Qt.Orientation.Horizontal)
-        self._resources_split.addWidget(self._tree_panel)
-        self._resources_split.addWidget(self._editor_panel)
-        self._resources_split.setSizes([300, 1100])
-        self._resources_split.setCollapsible(0, False)
-        self._resources_split.setCollapsible(1, False)
-        self._tree_panel.setMinimumWidth(150)
-        self._editor_panel.setMinimumWidth(400)
-
         # Stacked widget — no tab bar, menu-driven navigation
         self._stack = QStackedWidget()
-        self._stack.addWidget(self._resources_split)          # 0 = Resources
+        self._stack.addWidget(self._editor_panel)             # 0 = Resources (full width)
         self._stack.addWidget(self._history_panel)            # 1 = Projects
         self._stack.addWidget(self._active_projects_panel)    # 2 = Active Projects
         self._stack.addWidget(self._website_projects_panel)   # 3 = Websites
@@ -194,9 +185,10 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._simulator_panel)          # 5 = Simulator
         self._stack.addWidget(self._projektant_panel)         # 6 = Projektant
         self._stack.addWidget(self._cc_launcher_panel)        # 7 = Sesje CC
+        self._stack.addWidget(self._zadania_panel)             # 8 = Zadania
 
-        # BB panels — track indices dynamically starting at 8
-        bb_idx = 8
+        # BB panels — track indices dynamically starting at 9
+        bb_idx = 9
         self._bb_page_coa = -1
         self._bb_page_iso = -1
         self._bb_page_ingest = -1
@@ -220,22 +212,17 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._status_bar)
 
         # Connect signals
-        self._tree_panel.resource_selected.connect(self._on_resource_selected)
-        self._tree_panel.project_detail_requested.connect(self._on_project_detail)
-        self._tree_panel.refresh_requested.connect(self._scan_resources)
+        self._projektant_panel.project_ready.connect(self._on_project_ready)
         self._history_panel.active_projects_changed.connect(self._active_projects_panel.refresh)
         self._history_panel.website_projects_changed.connect(self._website_projects_panel.refresh)
         self._history_panel.project_hidden.connect(self._hidden_projects_panel.refresh)
         self._hidden_projects_panel.project_unhidden.connect(self._history_panel.refresh)
 
     def _scan_resources(self) -> None:
-        """Scan all resources and populate the tree."""
+        """Scan all resources and update status / welcome screen."""
         self._status_bar.set_status("Scanning resources...")
 
         managed, user, projects, external = discover_all()
-
-        tree = build_tree(managed, user, projects, external)
-        self._tree_panel.populate(tree)
 
         total = (
             len(managed)
@@ -246,7 +233,6 @@ class MainWindow(QMainWindow):
         self._status_bar.set_status("Ready")
         self._status_bar.show_scan_summary(total)
 
-        # Show welcome screen only if no resource is currently selected
         if self._editor_panel._current_resource is None:
             self._editor_panel.show_welcome(
                 managed=len(managed),
@@ -255,6 +241,18 @@ class MainWindow(QMainWindow):
                 external=len(external),
             )
 
+    def _sync_zadania_from_active_slot(self) -> None:
+        """Wczytaj projekt aktywnego slotu CC do ZadaniaPanel (jeśli ustawiony)."""
+        try:
+            active_slot = self._cc_launcher_panel._slots[
+                self._cc_launcher_panel._slot_tabs.currentIndex()
+            ]
+            project_path = active_slot.get_config().project_path.strip()
+        except Exception:
+            return
+        if project_path:
+            self._zadania_panel.load_from_project(project_path)
+
     def _refresh_all(self) -> None:
         """Refresh resources, history, active projects, and websites."""
         self._scan_resources()
@@ -262,6 +260,12 @@ class MainWindow(QMainWindow):
         self._active_projects_panel.refresh()
         self._website_projects_panel.refresh()
         self._hidden_projects_panel.refresh()
+
+    def _on_project_ready(self, path) -> None:
+        """Projektant created a new project — assign to Sesje CC and switch there."""
+        from pathlib import Path
+        slot = self._cc_launcher_panel.assign_project(Path(path))
+        self._show_page(self._PAGE_SESJE_CC)
 
     def _on_resource_selected(self, resource: Resource) -> None:
         """Handle resource selection from tree."""
@@ -273,12 +277,6 @@ class MainWindow(QMainWindow):
         """Handle project selection from All Projects list."""
         self._show_page(self._PAGE_RESOURCES)
         self._editor_panel.show_project_detail(proj)
-
-    def _expand_all(self) -> None:
-        self._tree_panel._tree.expandAll()
-
-    def _collapse_all(self) -> None:
-        self._tree_panel._tree.collapseAll()
 
     def _reset_colors(self) -> None:
         """Reset all category colors to defaults and refresh tree."""
@@ -627,9 +625,8 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         QMessageBox.about(
             self,
-            "About Claude Environment Manager",
-            "Claude Environment Manager v0.1\n\n"
-            "Browse and view all local Claude Code\n"
-            "and Claude.ai resources from one place.\n\n"
-            "Phase 1: Scanner + TreeView + Read-only viewer",
+            "About Claude Manager",
+            "Claude Manager v0.2\n\n"
+            "Centralna aplikacja zarządzająca wszystkimi narzędziami\n"
+            "i zasobami Claude Code z jednego miejsca.",
         )

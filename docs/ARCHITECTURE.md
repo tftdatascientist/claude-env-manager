@@ -43,6 +43,9 @@ claude-env-manager/
       active_projects_panel.py
       website_projects_panel.py
       hidden_projects_panel.py
+      projektant_panel.py    # ProjectantPanel — PLAN.md (diff+sekcje) / PCC (sekcje semantyczne)
+                             #   DiffView, PlanView, PlanSectionsPanel, PccView, PccSectionsPanel
+      ai_project_wizard.py   # AIProjectWizardDialog — kreator projektu przez AI
       simulator/
         simulator_panel.py   # SimulatorPanel — glowny orkiestrator zakładki
         profile_editor.py    # ProfileEditor (QDialog)
@@ -61,7 +64,37 @@ claude-env-manager/
       website_projects.py    # lista projektow-stron WWW
       hidden_projects.py     # lista ukrytych projektow
       project_groups.py      # grupy projektow (ProjectGroup)
+      plan_parser.py         # PlanData, get_section, read_plan, write_plan (PCC v2.0)
       tost.py                # launchers dla zewnetrznego narzedzia TOST
+    workflow.py              # WorkflowRunner (QThread) — clean_plan, git_push, round_end
+    projektant/
+      template_parser.py     # Parser PCC v2.0: read/write_section, parse_dict/list, plan_*
+      templates/             # Szablony MD: PLAN.md, CLAUDE.md, ARCHITECTURE.md, CONVENTIONS.md
+    cc_launcher/
+      launcher_config.py     # LauncherConfig, SlotConfig, load/save
+      session_manager.py     # prepare_and_launch, open_vscode_window, terminate_vscode_session
+      session_history.py     # SessionHistorySummary, get_session_history, fmt_duration
+      project_stats.py       # ProjectStats, get_project_stats, fmt_size
+    watchers/
+      session_watcher.py     # SessionWatcher, TerminalSnapshot, read_transcript_tail
+  planist/                   # Moduł PLANist — generator i walidator PLAN.md
+    src/
+      context_reader.py      # ProjectContext, read_context() — odczyt CLAUDE/ARCH/CONV/PLAN
+      importance_scorer.py   # ImportanceScore, score() — ocena wagi projektu (0–1.0, granularność)
+      plan_writer.py         # PlanWriter API: write_section, set_next/current, append_done/log
+      planner.py             # generate_plan() — orchestracja: kontekst → prompt → cc --print → zapis
+      validator.py           # validate_plan() — walidacja PCC v2.0, exit 0/1
+      pcc_unpack.py          # unpack_payload() — JSON payload Wizarda → 4 pliki MD
+      cli.py                 # Typer CLI: planist run / validate / unpack
+      planist_runner.py      # PlanistRunner (QObject) + _PlanistWorker (QThread) — integracja CEM
+      planist_panel.py       # PlanistPanel (PySide6) — widget do osadzenia w CEM
+    templates/
+      plan_template.md       # Szablon PLAN.md PCC v2.0
+    tests/
+      test_planner.py        # 15 testów: ContextReader, ImportanceScorer, PlanWriter
+      test_validator.py      # 8 testów: validator.py
+      test_pcc_unpack.py     # 7 testów: pcc_unpack.py
+      test_runner_logic.py   # 8 testów: _generate_wrapper, _validate_wrapper
   tests/
     test_scanner.py
     test_parsers.py

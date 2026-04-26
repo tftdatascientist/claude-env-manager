@@ -162,13 +162,13 @@ class EditorPanel(QWidget):
     def show_welcome(self, managed: int, user: int, projects: int, external: int) -> None:
         """Display a welcome/summary screen with resource counts."""
         total = managed + user + projects + external
-        self._header.setText("Claude Environment Manager")
+        self._header.setText("Claude Manager")
         self._header.setStyleSheet(
             "padding: 4px; background-color: #2d2d2d; color: #ccc; font-size: 11px;"
         )
 
         lines = [
-            "Claude Environment Manager",
+            "Claude Manager",
             "=" * 50,
             "",
             f"Scanned resources: {total}",

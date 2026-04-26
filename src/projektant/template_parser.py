@@ -1,12 +1,14 @@
 """
-Template parser for Projektant CC module.
+Template parser for Projektant CC module (PCC v2.0).
 
 Handles reading/writing of structured markdown sections using HTML comment markers:
     <!-- SECTION:name --> ... <!-- /SECTION:name -->
 
 Two section types are supported:
 - dict: lines in the format `- key: value`
-- list: lines in the format `- [ ] text | date` or `- [x] text | date`
+- list: lines in the format `- [ ] text` or `- [x] text @ timestamp`
+
+Project files (PCC): CLAUDE.md, ARCHITECTURE.md, PLAN.md, CONVENTIONS.md
 """
 from __future__ import annotations
 
@@ -189,31 +191,80 @@ def status_pop_current(path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# PLAN.md operations
+# PLAN.md operations (PCC v2.0)
 # ---------------------------------------------------------------------------
 
-def plan_check_step(path: Path, text_fragment: str) -> bool:
-    """Mark first matching step as done."""
-    steps = read_section_list(path, "steps")
-    idx = next(
-        (i for i, s in enumerate(steps) if text_fragment.lower() in s["text"].lower()),
-        None,
-    )
-    if idx is None:
-        return False
-    steps[idx]["done"] = True
-    if not steps[idx].get("date"):
-        steps[idx]["date"] = datetime.now().strftime("%Y-%m-%d")
-    update_section_list(path, "steps", steps)
-    return True
-
-
 def plan_set_status(path: Path, status: str) -> None:
-    """Set plan status in PLAN meta section (e.g. 'active', 'done', 'cancelled')."""
+    """Set plan status in PLAN meta section ('active' | 'idle')."""
     meta = read_section_dict(path, "meta")
     meta["status"] = status
     meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     update_section_dict(path, "meta", meta)
+
+
+def plan_write_current(path: Path, task: str, file: str = "", started: str = "") -> None:
+    """Overwrite the current section with a new task."""
+    started = started or datetime.now().strftime("%Y-%m-%d %H:%M")
+    update_section_dict(path, "current", {"task": task, "file": file, "started": started})
+
+
+def plan_move_to_done(path: Path, timestamp: str = "") -> bool:
+    """Move current task to done list. Returns False if current is empty."""
+    current = read_section_dict(path, "current")
+    task = current.get("task", "").strip()
+    if not task:
+        return False
+    ts = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M")
+    done_body = read_section(path.read_text(encoding="utf-8"), "done") or ""
+    new_line = f"- [x] {task} @ {ts}\n"
+    text = path.read_text(encoding="utf-8")
+    text = write_section(text, "done", done_body + new_line)
+    text = write_section(text, "current", "- task: \n- file: \n- started: \n")
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
+def plan_append_session_log(path: Path, entry: str, max_entries: int = 10) -> None:
+    """Append entry to session_log (FIFO, max max_entries lines)."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    new_line = f"- {ts} | {entry}\n"
+    body = read_section(path.read_text(encoding="utf-8"), "session_log") or ""
+    lines = [l for l in body.splitlines(keepends=True) if l.strip()]
+    lines.append(new_line)
+    if len(lines) > max_entries:
+        lines = lines[-max_entries:]
+    update_section_dict  # unused — write directly
+    text = path.read_text(encoding="utf-8")
+    text = write_section(text, "session_log", "".join(lines))
+    path.write_text(text, encoding="utf-8")
+
+
+def plan_flush(path: Path) -> None:
+    """Clear done/current/next/blockers, set status=idle (end of round)."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    text = path.read_text(encoding="utf-8")
+    text = write_section(text, "current", "- task: \n- file: \n- started: \n")
+    text = write_section(text, "next", "")
+    text = write_section(text, "done", "")
+    text = write_section(text, "blockers", "")
+    meta = parse_dict(read_section(text, "meta") or "")
+    meta["status"] = "idle"
+    meta["updated"] = now
+    text = write_section(text, "meta", build_dict(meta))
+    path.write_text(text, encoding="utf-8")
+
+
+def plan_validate(path: Path) -> list[str]:
+    """Return list of validation errors. Empty list = OK."""
+    errors: list[str] = []
+    text = path.read_text(encoding="utf-8")
+    for section in ("meta", "current", "next", "done", "blockers", "session_log"):
+        if read_section(text, section) is None:
+            errors.append(f"Missing section: {section}")
+    meta = parse_dict(read_section(text, "meta") or "")
+    if meta.get("status") not in ("active", "idle"):
+        errors.append(f"meta.status must be 'active' or 'idle', got: {meta.get('status')!r}")
+    return errors
 
 
 # ---------------------------------------------------------------------------

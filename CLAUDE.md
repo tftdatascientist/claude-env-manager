@@ -1,6 +1,6 @@
-# Claude Environment Manager
+# Claude Manager
 
-Desktopowa aplikacja Windows 11 (PySide6) do przegladania i edycji wszystkich lokalnych zasobow Claude Code i Claude.ai z jednego miejsca.
+Centralna aplikacja desktopowa Windows 11 (PySide6) zarządzająca wszystkimi narzędziami i zasobami Claude Code z jednego miejsca.
 
 
 ## Uruchomienie
@@ -25,16 +25,17 @@ Python 3.13 · PySide6 (Qt6) · watchdog · pytest · pywin32
 ## Podprojekty zagnieżdżone (IZOLOWANE)
 
 Poniższe foldery to **osobne projekty** z własnym CLAUDE.md i własnym kontekstem.
-Jeśli sesja CC jest uruchamiana z ich katalogu — kontekst CEM NIE dotyczy tamtej pracy.
+Jeśli sesja CC jest uruchamiana z ich katalogu — kontekst CM NIE dotyczy tamtej pracy.
 
-| Folder | Projekt | Relacja do CEM |
+| Folder | Projekt | Relacja do CM |
 |--------|---------|----------------|
-| `BB/` | Boris Best — baza wiedzy CC | moduł CEM (integracja przez COA panel) |
+| `BB/` | Boris Best — baza wiedzy CC | moduł CM (integracja przez COA panel) |
 | `ccnsr/` | CC Notion Skills Repository | niezależny pipeline GitHub→Notion |
 | `VS_CLAUDE/` | cc-panel — rozszerzenie VS Code | niezależne repo, własny stack TS |
-| `project/` | Projektant CC — szablony projektowe | moduł CEM LUB samodzielny projekt |
+| `project/` | Projektant CC — szablony projektowe | moduł CM LUB samodzielny projekt |
+| `planist/` | PLAN.md - Moduł do obsługi | moduł CM LUB samodzielny projekt |
 
-**Zasada:** Nie czytaj CLAUDE.md podprojektu jeśli pracujesz nad CEM i odwrotnie.
+**Zasada:** Nie czytaj CLAUDE.md podprojektu jeśli pracujesz nad CM i odwrotnie.
 
 ## Dokumentacja — gdzie szukac
 

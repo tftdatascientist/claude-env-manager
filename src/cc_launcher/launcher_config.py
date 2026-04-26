@@ -35,7 +35,6 @@ class SlotConfig:
         model: Identyfikator modelu CC.
         effort: Poziom wysiłku (high/medium/low).
         permission_mode: Klucz trybu uprawnień z CC_PERMISSION_MODES.
-        terminal_count: Liczba terminali CC do uruchomienia (1–4).
         vibe_prompt: Prompt startowy wklejany do terminala CC.
     """
 
@@ -43,27 +42,29 @@ class SlotConfig:
     model: str = "claude-sonnet-4-5"
     effort: str = "high"
     permission_mode: str = "bypass (--dangerously-skip-permissions)"
-    terminal_count: int = 1
     vibe_prompt: str = DEFAULT_VIBE_PROMPT
 
 
 @dataclass
 class LauncherConfig:
-    """Konfiguracja całego CC Launcher — 4 sloty.
+    """Konfiguracja całego CC Launcher — 4 sloty + globalna liczba terminali.
 
     Args:
         slots: Lista konfiguracji 4 slotów projektów.
+        terminal_count: Globalna liczba terminali CC uruchamianych z każdego slotu (1–4).
     """
 
     slots: list[SlotConfig] = field(
         default_factory=lambda: [SlotConfig() for _ in range(4)]
     )
+    terminal_count: int = 1
 
 
 def load_launcher_config() -> LauncherConfig:
     """Wczytuje konfigurację z launcher_config.json.
 
     Przy braku pliku próbuje zainicjować ścieżki z ustawienia.json cc-panel.
+    Migracja: stare configi z `terminal_count` per-slot → globalne max.
 
     Returns:
         Załadowana lub domyślna konfiguracja.
@@ -71,7 +72,8 @@ def load_launcher_config() -> LauncherConfig:
     if _CONFIG_PATH.exists():
         try:
             raw: Any = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-            slots = []
+            slots: list[SlotConfig] = []
+            legacy_counts: list[int] = []
             for slot_raw in raw.get("slots", [])[:4]:
                 slots.append(SlotConfig(
                     project_path=slot_raw.get("project_path", ""),
@@ -81,12 +83,21 @@ def load_launcher_config() -> LauncherConfig:
                         "permission_mode",
                         "bypass (--dangerously-skip-permissions)",
                     ),
-                    terminal_count=int(slot_raw.get("terminal_count", 1)),
                     vibe_prompt=slot_raw.get("vibe_prompt", DEFAULT_VIBE_PROMPT),
                 ))
+                if "terminal_count" in slot_raw:
+                    try:
+                        legacy_counts.append(int(slot_raw["terminal_count"]))
+                    except (TypeError, ValueError):
+                        pass
             while len(slots) < 4:
                 slots.append(SlotConfig())
-            return LauncherConfig(slots=slots)
+            terminal_count = int(raw.get(
+                "terminal_count",
+                max(legacy_counts) if legacy_counts else 1,
+            ))
+            terminal_count = max(1, min(4, terminal_count))
+            return LauncherConfig(slots=slots, terminal_count=terminal_count)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             pass
 
@@ -109,7 +120,10 @@ def save_launcher_config(config: LauncherConfig) -> None:
         config: Konfiguracja do zapisania.
     """
     _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = {"slots": [asdict(slot) for slot in config.slots]}
+    data = {
+        "terminal_count": int(max(1, min(4, config.terminal_count))),
+        "slots": [asdict(slot) for slot in config.slots],
+    }
     _CONFIG_PATH.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

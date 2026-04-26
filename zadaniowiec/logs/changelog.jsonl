@@ -1,0 +1,13 @@
+{"ts": "2026-04-26 02:00", "file": "CLAUDE.md", "section": "[key_files]", "action": "dodano", "preview": "- Plik | Rola --- | --- - `claude_manager.py` | Punkt wejścia aplikacji, inicjal"}
+{"ts": "2026-04-26 02:00", "file": "CLAUDE.md", "section": "[project]", "action": "dodano", "preview": "- name: Moduł Zadania  PLAN.md - type: - client: - stack: Python · CustomTkinter"}
+{"ts": "2026-04-26 02:00", "file": "CLAUDE.md", "section": "[stack]", "action": "dodano", "preview": "- Python · CustomTkinter (GUI) · Claude AI (subskrypcja, bez klucza API) · regex"}
+{"ts": "2026-04-26 02:00", "file": "ARCHITECTURE.md", "section": "[components]", "action": "dodano", "preview": "- Moduł | Plik(i) | Odpowiedzialność --- | --- | --- - GUI Zadania | tasks_panel"}
+{"ts": "2026-04-26 02:00", "file": "ARCHITECTURE.md", "section": "[data_flow]", "action": "dodano", "preview": "Użytkownik wypełnia formularz (cel, kontekst, stan, waga) w panelu Zadania → cor"}
+{"ts": "2026-04-26 02:00", "file": "ARCHITECTURE.md", "section": "[decisions]", "action": "dodano", "preview": "- [ ] 1. Oddzielenie parsera od writera — plan_parser.py tylko czyta i wykrywa f"}
+{"ts": "2026-04-26 02:00", "file": "ARCHITECTURE.md", "section": "[external_deps]", "action": "dodano", "preview": "- Lib/API | Cel | Wersja --- | --- | --- - customtkinter | Widgety GUI (scrollow"}
+{"ts": "2026-04-26 02:00", "file": "ARCHITECTURE.md", "section": "[overview]", "action": "dodano", "preview": "Użytkownik wypełnia formularz (cel, kontekst, stan, waga) w panelu Zadania → cor"}
+{"ts": "2026-04-26 02:00", "file": "CONVENTIONS.md", "section": "[code_style]", "action": "dodano", "preview": "- Każdy moduł ma jedną odpowiedzialność; GUI (CustomTkinter) oddzielone od logik"}
+{"ts": "2026-04-26 02:00", "file": "CONVENTIONS.md", "section": "[commit_style]", "action": "dodano", "preview": "- Typy commitów: feat (nowa funkcja), fix (naprawa), refactor (bez zmiany zachow"}
+{"ts": "2026-04-26 02:00", "file": "CONVENTIONS.md", "section": "[file_layout]", "action": "dodano", "preview": "- claude_manager/ - ├── gui/ - │   ├── menu_develop.py - │   └── tasks_panel.py "}
+{"ts": "2026-04-26 02:00", "file": "CONVENTIONS.md", "section": "[naming]", "action": "dodano", "preview": "- Pliki modułów: snake_case (np. task_manager.py, plan_parser.py). Klasy: Pascal"}
+{"ts": "2026-04-26 02:00", "file": "CONVENTIONS.md", "section": "[testing]", "action": "dodano", "preview": "- Testy w pytest umieszczone w katalogu tests/ z prefiksem test_ (np. test_plan_"}

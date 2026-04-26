@@ -1,4 +1,4 @@
-"""Entry point for Claude Environment Manager."""
+"""Entry point for Claude Manager."""
 
 import sys
 from PySide6.QtWidgets import QApplication
@@ -9,7 +9,7 @@ from src.ui.main_window import MainWindow
 
 def main() -> None:
     app = QApplication(sys.argv)
-    app.setApplicationName("Claude Environment Manager")
+    app.setApplicationName("Claude Manager")
     app.setApplicationVersion("0.1.0")
 
     # Dark theme stylesheet

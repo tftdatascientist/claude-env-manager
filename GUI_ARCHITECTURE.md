@@ -11,34 +11,33 @@ Dokument referencyjny opisujacy interfejs graficzny aplikacji. Sluzy jako specyf
 ## Struktura okna glownego
 
 ```
-+-----------------------------------------------------------+
-|  Menu: File | View | Claude Code | Websites | Web_Dev | Tools | Help  |
-+----------------+------------------------------------------+
-|                | [Resources][History][Active][Web][Hidden]  |
-|   TreePanel    |                                           |
-|   (QTreeView)  | Tab Resources: EditorPanel               |
-|                |   Header: "SCOPE: path [READ-ONLY]"      |
-|   Kategorie:   |   QPlainTextEdit (Consolas 10, read-only) |
-|   - Managed    |                                           |
-|   - User       | Tab History: HistoryPanel                 |
-|   - Projects   |   [Search: ___] [N msg / N thr / N proj] |
-|   - External   |   [v]Active [v]Web columns + checkboxes  |
-|                |   Groups (gold #e5c07b) na gorze          |
-|  PPM:          |   Project > Thread > Msg tree             |
-|  Explorer      |   Detail panel (max 180px)                |
-|  VS Code       |                                           |
-|  Terminal      | Tab Active Projects: ActiveProjectsPanel  |
-|  Copy path     |   Lista projektow | Drzewo plikow        |
-|  Rename...     |                   | Podglad pliku         |
-|  Hide          |                                           |
-|  Group         | Tab Websites: WebsiteProjectsPanel        |
-|                |   Lista projektow | Placeholder           |
-|                |                                           |
-|                | Tab Hidden: HiddenProjectsPanel           |
-|                |   Lista ukrytych + PPM Unhide             |
-+----------------+------------------------------------------+
-| Status: sciezka_pliku | scope | type | read-only | data    |
-+-----------------------------------------------------------+
++------------------------------------------------------------------+
+|  File | Projekty | Develop | Claude Code | Websites | Web_Dev | Tools | View | Help  |
++------------------------------------------------------------------+
+|                                                                  |
+|   QStackedWidget (centralWidget) — aktywna strona zalezy od menu|
+|                                                                  |
+|   Strona Resources (Ctrl+1):                                     |
+|   +----------------------------------------------------------+   |
+|   | EditorPanel (pelna szerokosc)                            |   |
+|   | Header: "SCOPE: path [READ-ONLY]"                        |   |
+|   | QPlainTextEdit (Consolas 10, read-only)                  |   |
+|   +----------------------------------------------------------+   |
+|                                                                  |
+|   Strona Projects / All Projects (Ctrl+2/4):                     |
+|   +----------------------------------------------------------+   |
+|   | HistoryPanel (pelna szerokosc)                           |   |
+|   | [Search: ___] [N msg / N thr / N proj]                   |   |
+|   | Groups (gold) na gorze, Project > Thread > Msg tree      |   |
+|   | Detail panel (max 180px)                                 |   |
+|   +----------------------------------------------------------+   |
+|                                                                  |
+|   Inne strony (Active Projects, Hidden, Simulator, itd.)         |
+|   analogicznie — kazda zajmuje pelna szerokosc okna             |
+|                                                                  |
++------------------------------------------------------------------+
+| Status: sciezka_pliku | scope | type | read-only | data          |
++------------------------------------------------------------------+
 ```
 
 ## Hierarchia widgetow
@@ -47,10 +46,9 @@ Dokument referencyjny opisujacy interfejs graficzny aplikacji. Sluzy jako specyf
 MainWindow (QMainWindow, 1400x800, min 1000x600)
  ├── MenuBar
  │    ├── File: Refresh (F5), Quit (Ctrl+Q)
- │    ├── View: Expand All, Collapse All, Resources (Ctrl+1), Projects (Ctrl+2),
- │    │         Active Projects (Ctrl+3), Websites (Ctrl+4), Hidden (Ctrl+5),
- │    │         Simulator (Ctrl+6), Projektant (Ctrl+7), Sesje CC (Ctrl+8),
- │    │         Reset category colors
+ │    ├── Projekty: Resources (Ctrl+1), Projects (Ctrl+2), Active Projects (Ctrl+3),
+ │    │             All Projects (Ctrl+4), Hidden (Ctrl+5)
+ │    ├── Develop: Projektant (Ctrl+7), Sesje CC (Ctrl+8)
  │    ├── Claude Code: COA — Konsultant (Ctrl+9)*, ISO — Walidator (Ctrl+0)*,
  │    │               Ingest — Dodaj do vaultu (Ctrl+W)*, Wiki — Przeglądarka (Ctrl+Shift+W)*,
  │    │               CZY wiesz że…*   (* = widoczne tylko jeśli moduł BB dostępny)
@@ -61,49 +59,77 @@ MainWindow (QMainWindow, 1400x800, min 1000x600)
  │    ├── Web_Dev: Editor,
  │    │            ---, Etap 0 — Brief, Etap 1 — WCS Init
  │    │            [każda pozycja uruchamia WMS i otwiera odpowiedni dialog]
- │    ├── Tools: cc-panel > Ustaw folder projektu…, Edytuj listy dropdown…
+ │    ├── Tools: Simulator (Ctrl+6),
+ │    │          ---, cc-panel > Ustaw folder projektu…, Edytuj listy dropdown…
  │    │          ---, TOST — Token Monitor > Monitor, Simulator, Duel, Trainer,
  │    │                                      ---, Notion Sync Continuous, Notion Sync Once
+ │    ├── View: Expand All, Collapse All, ---, Reset category colors
  │    └── Help: About
- ├── QSplitter (Horizontal, proporcje 1:3, rozmiary 300:900)
- │    ├── TreePanel (QWidget)
+ ├── QStackedWidget (centralWidget) — nawigacja przez menu, brak paska zakladek
+ │    ├── Strona 0 "Resources" (Ctrl+1): EditorPanel (QWidget, pelna szerokosc)
+ │    │    └── QVBoxLayout (margins=0, spacing=0)
+ │    │         ├── QLabel (header - scope + path + read-only badge)
+ │    │         └── QPlainTextEdit (read-only, Consolas 10, no wrap)
+ │    ├── Strona 1 "Projects" (Ctrl+2 / Ctrl+4): HistoryPanel (QWidget)
  │    │    └── QVBoxLayout (margins=0)
- │    │         └── QTreeView (model=QStandardItemModel)
- │    └── QTabWidget (5 zakladek)
- │         ├── Tab 0 "Resources": EditorPanel (QWidget)
- │         │    └── QVBoxLayout (margins=0, spacing=0)
- │         │         ├── QLabel (header - scope + path + read-only badge)
- │         │         └── QPlainTextEdit (read-only, Consolas 10, no wrap)
- │         ├── Tab 1 "History": HistoryPanel (QWidget)
- │         │    └── QVBoxLayout (margins=0)
- │         │         ├── QHBoxLayout (filter bar, margins=4)
- │         │         │    ├── QLabel "Search:"
- │         │         │    ├── QLineEdit (placeholder="Search prompts...")
- │         │         │    └── QLabel (count: "N messages / N threads / N projects")
- │         │         └── QSplitter (Vertical, proporcje 3:1)
- │         │              ├── QTreeWidget (5 kolumn, ExtendedSelection)
- │         │              └── QPlainTextEdit (detail, read-only, Consolas 10, maxHeight=180)
- │         ├── Tab 2 "Active Projects": ActiveProjectsPanel (QWidget)
- │         │    └── QSplitter (Horizontal, 1:3, 250:750)
- │         │         ├── QWidget (left)
- │         │         │    ├── QLabel header "Active Projects"
- │         │         │    └── QListWidget (project list)
- │         │         └── QSplitter (Vertical, 3:1)
- │         │              ├── QTreeView (QFileSystemModel, only Name column)
- │         │              └── QWidget (preview)
- │         │                   ├── QLabel header (file path)
- │         │                   └── QPlainTextEdit (read-only, Consolas 10, no wrap)
- │         ├── Tab 3 "Websites": WebsiteProjectsPanel (QWidget)
- │         │    └── QSplitter (Horizontal, 1:3, 250:750)
- │         │         ├── QWidget (left)
- │         │         │    ├── QLabel header "Website Projects"
- │         │         │    └── QListWidget (project list)
- │         │         └── QLabel (placeholder content area)
- │         └── Tab 4 "Hidden": HiddenProjectsPanel (QWidget)
- │              └── QVBoxLayout (margins=0)
- │                   ├── QLabel header "Hidden projects — right-click to unhide"
- │                   ├── QTreeWidget (3 kolumny: Project, Path, Status)
- │                   └── QLabel (count: "N hidden project(s)")
+ │    │         ├── QHBoxLayout (filter bar, margins=4)
+ │    │         │    ├── QLabel "Search:"
+ │    │         │    ├── QLineEdit (placeholder="Search prompts...")
+ │    │         │    └── QLabel (count: "N messages / N threads / N projects")
+ │    │         └── QSplitter (Vertical, proporcje 3:1)
+ │    │              ├── QTreeWidget (5 kolumn, ExtendedSelection)
+ │    │              └── QPlainTextEdit (detail, read-only, Consolas 10, maxHeight=180)
+ │    ├── Strona 2 "Active Projects" (Ctrl+3): ActiveProjectsPanel (QWidget)
+ │    │    └── QSplitter (Horizontal, 1:3, 250:750)
+ │    │         ├── QWidget (left)
+ │    │         │    ├── QLabel header "Active Projects"
+ │    │         │    └── QListWidget (project list)
+ │    │         └── QSplitter (Vertical, 3:1)
+ │    │              ├── QTreeView (QFileSystemModel, only Name column)
+ │    │              └── QWidget (preview)
+ │    │                   ├── QLabel header (file path)
+ │    │                   └── QPlainTextEdit (read-only, Consolas 10, no wrap)
+ │    ├── Strona 3 "Websites": WebsiteProjectsPanel (QWidget)
+ │    │    └── QSplitter (Horizontal, 1:3, 250:750)
+ │    │         ├── QWidget (left)
+ │    │         │    ├── QLabel header "Website Projects"
+ │    │         │    └── QListWidget (project list)
+ │    │         └── QLabel (placeholder content area)
+ │    ├── Strona 4 "Hidden" (Ctrl+5): HiddenProjectsPanel (QWidget)
+ │    │    └── QVBoxLayout (margins=0)
+ │    │         ├── QLabel header "Hidden projects — right-click to unhide"
+ │    │         ├── QTreeWidget (3 kolumny: Project, Path, Status)
+ │    │         └── QLabel (count: "N hidden project(s)")
+ │    ├── Strona 5 "Simulator" (Ctrl+6): SimulatorPanel (QWidget)
+ │    ├── Strona 6 "Projektant" (Ctrl+7): ProjectantPanel (QWidget)
+ │    │    └── QSplitter(Horizontal, 220 : reszta)
+ │    │         ├── Lewo: QListWidget (CLAUDE/ARCH/PLAN/CONV) + przyciski "Utwórz z szablonu"
+ │    │         └── Prawo: QStackedWidget
+ │    │              ├── [0] PlanView — aktywny gdy PLAN.md wybrany
+ │    │              │    ├── Toolbar: nazwa · [● niezapisane] · [Odśwież snapshot] · [Porzuć] · [Zapisz]
+ │    │              │    ├── QSplitter(Vertical, 420:200)
+ │    │              │    │    ├── QSplitter(Horizontal, 50/50)
+ │    │              │    │    │    ├── QPlainTextEdit — edytowalny raw MD (Consolas 10)
+ │    │              │    │    │    └── DiffView — diff vs snapshot (zielone=dodane, czerwone=usunięte)
+ │    │              │    │    └── PlanSectionsPanel — sekcje PCC zmapowane semantycznie
+ │    │              │    │         ├── Meta planu: pill statusu + cel + sesja + data aktualizacji
+ │    │              │    │         ├── Stan rundy: QLineEdit (task, edytowalny) + [Zapisz zadanie]
+ │    │              │    │         ├── Następne kroki: lista ○/✓ (max 10 pozycji)
+ │    │              │    │         ├── Ukończone: lista ✓
+ │    │              │    │         ├── Blokery: tekst (kolor #e06c75)
+ │    │              │    │         └── Dziennik sesji: ostatnie 4 wpisy (od najnowszego)
+ │    │              ├── [1] PccView — aktywny dla CLAUDE/ARCH/CONV
+ │    │              │    ├── Toolbar: nazwa · [● niezapisane] · [Porzuć] · [Zapisz]
+ │    │              │    └── QSplitter(Vertical, 500:200)
+ │    │              │         ├── QPlainTextEdit — edytowalny raw MD; live-refresh sekcji (600ms)
+ │    │              │         └── PccSectionsPanel — wiersze: [Rola 160px] | [podgląd] | [marker]
+ │    │              └── [2] QLabel "Wybierz plik z listy" — domyślna (brak wyboru)
+ │    ├── Strona 7 "Sesje CC" (Ctrl+8): CCLauncherPanel (QWidget)
+ │    ├── Strona 8+ BB panels (dynamiczne, tylko jesli modul dostepny):
+ │    │    ├── CoaPanel (Ctrl+9)
+ │    │    ├── IsoPanel (Ctrl+0)
+ │    │    ├── IngestPanel (Ctrl+W)
+ │    │    └── WikiPanel (Ctrl+Shift+W)
  └── StatusBar (QStatusBar)
       ├── QLabel _path_label (stretch=1) - sciezka lub "Ready"
       └── QLabel _info_label (permanent) - "scope | type | read-only | data" lub "N resources found"
@@ -439,7 +465,7 @@ class ProjectGroup:
   TreePanel._on_item_clicked()
     -> resource_selected.emit(Resource)
     -> MainWindow._on_resource_selected(Resource)
-        -> QTabWidget.setCurrentIndex(0)  # przelacz na Resources
+        -> QStackedWidget.setCurrentIndex(0)  # przelacz na strone Resources
         -> EditorPanel.show_resource(Resource)
         -> StatusBar.show_resource_info(Resource)
 
@@ -482,13 +508,43 @@ class ProjectGroup:
 | `hidden_projects.json` | JSON | Lista ukrytych projektow `[path, ...]` |
 | `project_groups.json` | JSON | Grupy projektow `[{main: path, members: [paths]}, ...]` |
 
+### ProjectantPanel (`src/ui/projektant_panel.py`)
+
+**Dwa widoki treści** przełączane przez QStackedWidget zależnie od wybranego pliku:
+
+**PlanView** (PLAN.md):
+- `DiffView` — oblicza diff przez `difflib.ndiff` między snaphotem (treść przy otwarciu) a bieżącą edycją; linie `+` mają tło `#1c3520` + kolor `#98c379`, linie `-` mają tło `#3a1515` + kolor `#e06c75`; kontekst szary `#3e4451`. Przycisk "Odśwież snapshot" resetuje punkt odniesienia do bieżącej treści.
+- `PlanSectionsPanel` — parsuje sekcje PCC przez `_SECTION_RE`, każda sekcja buduje swój widget przez `_detect_section_role()`. Sekcja `current` (Stan rundy) ma edytowalny QLineEdit z przyciskiem "Zapisz zadanie" — zapis przez `write_section()` bezpośrednio do pliku, następnie reload edytora.
+- Diff odświeża się z debounce 400ms po każdej zmianie w edytorze.
+
+**PccView** (CLAUDE/ARCH/CONV):
+- `PccSectionsPanel` — kompaktowe wiersze `[Rola | podgląd 140 znaków | [marker]]`; live-refresh z debounce 600ms.
+- Sekcje odświeżane przy każdej edycji raw tekstu.
+
+**Detekcja roli sekcji (`_detect_section_role`)** — mapuje po ZAWARTOŚCI, nie po nazwie markera:
+| Sygnał w treści | Rola |
+|-----------------|------|
+| `- task:` + `- started:` | Stan rundy |
+| `- status:` + `- goal:` | Meta planu |
+| `- [ ] 1.` (numerowane + data) | Decyzje |
+| `- [ ]` / `- [x]` items | Następne kroki / Ukończone |
+| timestamp `YYYY-MM-DD \| text` | Dziennik sesji |
+| `Plik \|` / `` `plik` \| `` | Kluczowe pliki |
+| `Moduł \| Plik` | Komponenty |
+| `Lib Cel Wersja` | Zależności zewnętrzne |
+| `- name:` + `- client:` | Definicja projektu |
+
+**Sygnały:**
+- `PlanView.saved` → `ProjectantPanel._on_view_saved()` → `_refresh_ui()`
+- `PlanSectionsPanel.task_saved` → `PlanView._on_task_saved()` → reload edytora
+
 ## Konwencje implementacyjne
 
 1. **Margins i spacing:** Panele ustawiaja `contentsMargins(0,0,0,0)` - bez dodatkowych marginesow
 2. **Fonty:** Consolas 10pt dla edytorow; systemowy font dla drzew z `setBold(True)` dla kategorii
 3. **Separator splitterow:** 2px szerokosc, kolor `#333333`
 4. **Proporcje splitterow:** TreePanel:Content = 1:3 (300:900px), History tree:detail = 3:1, Active/Web list:content = 1:3 (250:750)
-5. **Tab widget:** Dolna linia aktywnej zakladki = `#007acc` (2px border-bottom)
+5. **Nawigacja:** Brak paska zakladek — `QStackedWidget` przełączany przez menu (Projekty / Develop / Tools / Claude Code). Strona 0 (Resources) zawiera splitter TreePanel+EditorPanel jako jedną całość.
 6. **Context menu:** Uzywa `QMenu`, pozycjonowanie przez `viewport().mapToGlobal(pos)`
 7. **Lazy loading:** Tresc plikow ladowana on-demand przy kliknieciu (`resource.load_content()`)
 8. **Maskowanie:** Credentials i API keys zawsze zamaskowane w widoku (security.py)

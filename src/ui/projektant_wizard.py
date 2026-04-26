@@ -1,15 +1,14 @@
-"""Wizard dialog for building Projektant CC project files via dropdowns and checkboxes."""
+"""Wizard dialog for building PCC project files (CLAUDE/ARCHITECTURE/PLAN/CONVENTIONS)."""
 
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTabWidget,
     QWidget, QFormLayout, QComboBox, QLineEdit, QCheckBox, QScrollArea,
-    QGroupBox, QDialogButtonBox, QFrame, QPlainTextEdit, QSizePolicy,
+    QGroupBox, QDialogButtonBox, QFrame, QPlainTextEdit,
 )
 
 # ---------------------------------------------------------------------------
@@ -23,8 +22,6 @@ PROJECT_TYPES = [
 ]
 
 CLIENT_OPTIONS = ["", "własny", "klient komercyjny", "open source", "wewnętrzny"]
-
-REPO_OPTIONS = ["", "lokalne", "GitHub", "GitHub (prywatne)", "GitLab", "brak"]
 
 STACK_OPTIONS = [
     "Python 3.13", "Python 3.12", "Python 3.11",
@@ -42,20 +39,13 @@ STACK_OPTIONS = [
     "pywin32", "pathlib",
 ]
 
-PLAN_STATUS_OPTIONS = ["active", "on hold", "done", "cancelled"]
+PLAN_STATUS_OPTIONS = ["active", "idle"]
 
 ARCH_PATTERN_OPTIONS = [
     "MVC", "MVP", "MVVM", "layered", "event-driven",
     "pipeline", "plugin-based", "monolith", "microservices",
     "standalone script",
 ]
-
-CURRENT_STATE_OPTIONS = [
-    "in progress", "blocked", "waiting for review",
-    "waiting for input", "done", "not started",
-]
-
-BLOCKER_OPTIONS = ["none", "brak zasobów", "zależność zewnętrzna", "decyzja architektoniczna", "inne"]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -135,12 +125,10 @@ def _group(title: str) -> tuple[QGroupBox, QVBoxLayout]:
 
 
 def _checkboxes(options: list[str], checked: list[str] | None = None) -> tuple[QWidget, list[QCheckBox]]:
-    """Return a widget with a grid of checkboxes and the checkbox objects."""
     w = QWidget()
     layout = QVBoxLayout(w)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(2)
-    boxes: list[QCheckBox] = []
     for opt in options:
         cb = QCheckBox(opt)
         cb.setStyleSheet(_CHECK)
@@ -167,15 +155,12 @@ class ClaudeTab(QWidget):
         self._name = _input("np. Mój Projekt")
         self._type = _combo(PROJECT_TYPES)
         self._client = _combo(CLIENT_OPTIONS)
-        self._repo = _combo(REPO_OPTIONS)
-        for label, w in [("Nazwa:", self._name), ("Typ:", self._type),
-                         ("Klient:", self._client), ("Repo:", self._repo)]:
+        for label, w in [("Nazwa:", self._name), ("Typ:", self._type), ("Klient:", self._client)]:
             lbl = QLabel(label)
             lbl.setStyleSheet(_LABEL)
             form.addRow(lbl, w)
         layout.addLayout(form)
 
-        # Stack checkboxes
         gb, gb_lay = _group("Stack (zaznacz używane technologie)")
         _, self._stack_boxes = _checkboxes(STACK_OPTIONS)
         stack_w = QWidget()
@@ -187,7 +172,6 @@ class ClaudeTab(QWidget):
         gb_lay.addWidget(stack_w)
         layout.addWidget(gb)
 
-        # Key files — freetext list
         gb2, gb2_lay = _group("Key Files (jeden plik na linię: ścieżka: opis)")
         self._key_files = QPlainTextEdit()
         self._key_files.setPlaceholderText("src/main.py: punkt wejścia\nsrc/utils/helpers.py: narzędzia")
@@ -195,15 +179,6 @@ class ClaudeTab(QWidget):
         self._key_files.setFixedHeight(80)
         gb2_lay.addWidget(self._key_files)
         layout.addWidget(gb2)
-
-        # Specifics — freetext list
-        gb3, gb3_lay = _group("Specifics (jeden punkt na linię)")
-        self._specifics = QPlainTextEdit()
-        self._specifics.setPlaceholderText("Brak zagnieżdżonych sekcji\nParser działa standalone i jako import")
-        self._specifics.setStyleSheet(_TEXTAREA)
-        self._specifics.setFixedHeight(70)
-        gb3_lay.addWidget(self._specifics)
-        layout.addWidget(gb3)
 
         layout.addStretch()
         self.setLayout(QVBoxLayout())
@@ -213,91 +188,16 @@ class ClaudeTab(QWidget):
     def get_overrides(self) -> dict:
         stack_items = [cb.text() for cb in self._stack_boxes if cb.isChecked()]
         key_files_lines = [l.strip() for l in self._key_files.toPlainText().splitlines() if l.strip()]
-        specifics_lines = [l.strip() for l in self._specifics.toPlainText().splitlines() if l.strip()]
+        stack_str = ", ".join(stack_items) if stack_items else "Python 3.13+"
         return {
             "project": {
                 "name": self._name.text().strip(),
                 "type": self._type.currentText(),
                 "client": self._client.currentText(),
-                "repo": self._repo.currentText(),
+                "stack": stack_str,
             },
             "_stack_items": stack_items,
             "_key_files_items": key_files_lines,
-            "_specifics_items": specifics_lines,
-        }
-
-
-class StatusTab(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        inner = QWidget()
-        layout = QVBoxLayout(inner)
-        layout.setSpacing(8)
-
-        form = QFormLayout()
-        form.setSpacing(6)
-        self._project = _input("nazwa projektu")
-        self._plan = _combo(["none", "active", "on hold", "done"])
-
-        for label, w in [("Projekt:", self._project), ("Plan:", self._plan)]:
-            lbl = QLabel(label)
-            lbl.setStyleSheet(_LABEL)
-            form.addRow(lbl, w)
-        layout.addLayout(form)
-
-        # Current section
-        gb, gb_lay = _group("Current — aktualny stan")
-        form2 = QFormLayout()
-        form2.setSpacing(6)
-        self._task = _input("co teraz robisz")
-        self._files = _input("src/foo.py, src/bar.py")
-        self._state = _combo(CURRENT_STATE_OPTIONS, "in progress")
-        self._blocker = _combo(BLOCKER_OPTIONS, "none")
-        self._next_step = _input("następny krok")
-        for label, w in [("Task:", self._task), ("Files:", self._files),
-                         ("State:", self._state), ("Blocker:", self._blocker),
-                         ("Next step:", self._next_step)]:
-            lbl = QLabel(label)
-            lbl.setStyleSheet(_LABEL)
-            form2.addRow(lbl, w)
-        gb_lay.addLayout(form2)
-        layout.addWidget(gb)
-
-        # Next tasks
-        gb2, gb2_lay = _group("Next — zadania do zrobienia (jeden na linię)")
-        self._next_tasks = QPlainTextEdit()
-        self._next_tasks.setPlaceholderText("Napisać testy\nDodać walidację\nRefaktor modułu X")
-        self._next_tasks.setStyleSheet(_TEXTAREA)
-        self._next_tasks.setFixedHeight(80)
-        gb2_lay.addWidget(self._next_tasks)
-        layout.addWidget(gb2)
-
-        layout.addStretch()
-        self.setLayout(QVBoxLayout())
-        self.layout().addWidget(_scrolled(inner))
-        self.layout().setContentsMargins(4, 4, 4, 4)
-
-    def get_overrides(self) -> dict:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        next_items = [
-            {"done": False, "text": l.strip(), "date": ""}
-            for l in self._next_tasks.toPlainText().splitlines() if l.strip()
-        ]
-        return {
-            "meta": {
-                "project": self._project.text().strip(),
-                "session": "1",
-                "updated": now,
-                "plan": self._plan.currentText(),
-            },
-            "current": {
-                "task": self._task.text().strip(),
-                "files": self._files.text().strip(),
-                "state": self._state.currentText(),
-                "blocker": self._blocker.currentText(),
-                "next_step": self._next_step.text().strip(),
-            },
-            "_next_items": next_items,
         }
 
 
@@ -308,7 +208,6 @@ class ArchitectureTab(QWidget):
         layout = QVBoxLayout(inner)
         layout.setSpacing(8)
 
-        # Overview
         gb, gb_lay = _group("Overview — opis modułu/aplikacji")
         self._overview = QPlainTextEdit()
         self._overview.setPlaceholderText("Krótki opis czym jest ten projekt i co robi...")
@@ -317,7 +216,6 @@ class ArchitectureTab(QWidget):
         gb_lay.addWidget(self._overview)
         layout.addWidget(gb)
 
-        # Architecture pattern
         gb2, gb2_lay = _group("Wzorzec architektoniczny")
         _, self._pattern_boxes = _checkboxes(ARCH_PATTERN_OPTIONS)
         pat_w = QWidget()
@@ -329,32 +227,45 @@ class ArchitectureTab(QWidget):
         gb2_lay.addWidget(pat_w)
         layout.addWidget(gb2)
 
-        # Components
-        gb3, gb3_lay = _group("Components (jeden na linię: nazwa: opis)")
+        gb3, gb3_lay = _group("Components (jeden na linię: NazwaKomponentu: opis)")
         self._components = QPlainTextEdit()
-        self._components.setPlaceholderText("parser.py: rdzeń — parsowanie sekcji\nui/panel.py: interfejs użytkownika")
+        self._components.setPlaceholderText("Parser: rdzeń — parsowanie sekcji MD\nUIPanel: interfejs użytkownika PySide6")
         self._components.setStyleSheet(_TEXTAREA)
         self._components.setFixedHeight(80)
         gb3_lay.addWidget(self._components)
         layout.addWidget(gb3)
 
-        # Data flow
-        gb4, gb4_lay = _group("Data Flow (opis przepływu danych)")
+        gb4, gb4_lay = _group("External Dependencies (jeden na linię: pakiet: wersja)")
+        self._ext_deps = QPlainTextEdit()
+        self._ext_deps.setPlaceholderText("python: 3.13+\npytest: 8.2+\npydantic: 2.0+")
+        self._ext_deps.setStyleSheet(_TEXTAREA)
+        self._ext_deps.setFixedHeight(60)
+        gb4_lay.addWidget(self._ext_deps)
+        layout.addWidget(gb4)
+
+        gb5, gb5_lay = _group("Constraints (jeden na linię)")
+        self._constraints = QPlainTextEdit()
+        self._constraints.setPlaceholderText("Brak zagnieżdżonych sekcji\nWyłącznie UTF-8")
+        self._constraints.setStyleSheet(_TEXTAREA)
+        self._constraints.setFixedHeight(50)
+        gb5_lay.addWidget(self._constraints)
+        layout.addWidget(gb5)
+
+        gb6, gb6_lay = _group("Data Flow")
         self._data_flow = QPlainTextEdit()
         self._data_flow.setPlaceholderText("Wejście → Przetwarzanie → Wyjście")
         self._data_flow.setStyleSheet(_TEXTAREA)
-        self._data_flow.setFixedHeight(60)
-        gb4_lay.addWidget(self._data_flow)
-        layout.addWidget(gb4)
+        self._data_flow.setFixedHeight(50)
+        gb6_lay.addWidget(self._data_flow)
+        layout.addWidget(gb6)
 
-        # Decisions
-        gb5, gb5_lay = _group("Decisions (jeden na linię)")
+        gb7, gb7_lay = _group("Decisions (jeden na linię: opis | YYYY-MM-DD | uzasadnienie)")
         self._decisions = QPlainTextEdit()
-        self._decisions.setPlaceholderText("Użyto X zamiast Y, bo...\nBrak zagnieżdżeń — regex nie obsługuje rekurencji")
+        self._decisions.setPlaceholderText("Użyto data_sources.query | 2026-04-24 | notion-client 3.0.0 usunął databases.query")
         self._decisions.setStyleSheet(_TEXTAREA)
         self._decisions.setFixedHeight(70)
-        gb5_lay.addWidget(self._decisions)
-        layout.addWidget(gb5)
+        gb7_lay.addWidget(self._decisions)
+        layout.addWidget(gb7)
 
         layout.addStretch()
         self.setLayout(QVBoxLayout())
@@ -364,17 +275,23 @@ class ArchitectureTab(QWidget):
     def get_overrides(self) -> dict:
         patterns = [cb.text() for cb in self._pattern_boxes if cb.isChecked()]
         components = [l.strip() for l in self._components.toPlainText().splitlines() if l.strip()]
+        ext_deps = [l.strip() for l in self._ext_deps.toPlainText().splitlines() if l.strip()]
+        constraints = [l.strip() for l in self._constraints.toPlainText().splitlines() if l.strip()]
         decisions = [l.strip() for l in self._decisions.toPlainText().splitlines() if l.strip()]
         return {
             "_overview": self._overview.toPlainText().strip(),
             "_patterns": patterns,
             "_components": components,
+            "_ext_deps": ext_deps,
+            "_constraints": constraints,
             "_data_flow": self._data_flow.toPlainText().strip(),
             "_decisions": decisions,
         }
 
 
 class PlanTab(QWidget):
+    """PCC v2.0 — meta / current / next / blockers."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         inner = QWidget()
@@ -384,30 +301,39 @@ class PlanTab(QWidget):
         form = QFormLayout()
         form.setSpacing(6)
         self._status = _combo(PLAN_STATUS_OPTIONS, "active")
-        self._goal = _input("cel planu / co chcemy osiągnąć")
-        for label, w in [("Status:", self._status), ("Cel:", self._goal)]:
+        self._goal = _input("cel bieżącej rundy")
+        for label, w in [("Status:", self._status), ("Cel rundy:", self._goal)]:
             lbl = QLabel(label)
             lbl.setStyleSheet(_LABEL)
             form.addRow(lbl, w)
         layout.addLayout(form)
 
-        # Steps
-        gb, gb_lay = _group("Steps — kroki planu (jeden na linię)")
-        self._steps = QPlainTextEdit()
-        self._steps.setPlaceholderText("Zaprojektować API\nNapisać testy\nZaimplementować parser\nCode review")
-        self._steps.setStyleSheet(_TEXTAREA)
-        self._steps.setFixedHeight(120)
-        gb_lay.addWidget(self._steps)
+        gb, gb_lay = _group("Current — pierwsze zadanie rundy")
+        self._current_task = _input("np. Zaimplementować parser MD")
+        self._current_file = _input("np. src/parser.py (opcjonalnie)")
+        for label, w in [("Zadanie:", self._current_task), ("Plik:", self._current_file)]:
+            lbl = QLabel(label)
+            lbl.setStyleSheet(_LABEL)
+            form2 = QFormLayout()
+            form2.addRow(lbl, w)
+            gb_lay.addLayout(form2)
         layout.addWidget(gb)
 
-        # Notes
-        gb2, gb2_lay = _group("Notes (opcjonalne)")
-        self._notes = QPlainTextEdit()
-        self._notes.setPlaceholderText("Dodatkowe uwagi, ograniczenia, kontekst...")
-        self._notes.setStyleSheet(_TEXTAREA)
-        self._notes.setFixedHeight(60)
-        gb2_lay.addWidget(self._notes)
+        gb2, gb2_lay = _group("Next — kolejne zadania (jeden na linię)")
+        self._next_tasks = QPlainTextEdit()
+        self._next_tasks.setPlaceholderText("Napisać testy\nZrefaktorować moduł X\nCode review")
+        self._next_tasks.setStyleSheet(_TEXTAREA)
+        self._next_tasks.setFixedHeight(100)
+        gb2_lay.addWidget(self._next_tasks)
         layout.addWidget(gb2)
+
+        gb3, gb3_lay = _group("Blockers (opcjonalnie, jeden na linię)")
+        self._blockers = QPlainTextEdit()
+        self._blockers.setPlaceholderText("Czekam na decyzję architektoniczną\n...")
+        self._blockers.setStyleSheet(_TEXTAREA)
+        self._blockers.setFixedHeight(50)
+        gb3_lay.addWidget(self._blockers)
+        layout.addWidget(gb3)
 
         layout.addStretch()
         self.setLayout(QVBoxLayout())
@@ -416,10 +342,8 @@ class PlanTab(QWidget):
 
     def get_overrides(self) -> dict:
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        steps = [
-            {"done": False, "text": l.strip(), "date": ""}
-            for l in self._steps.toPlainText().splitlines() if l.strip()
-        ]
+        next_lines = [l.strip() for l in self._next_tasks.toPlainText().splitlines() if l.strip()]
+        blocker_lines = [l.strip() for l in self._blockers.toPlainText().splitlines() if l.strip()]
         return {
             "meta": {
                 "status": self._status.currentText(),
@@ -427,30 +351,53 @@ class PlanTab(QWidget):
                 "session": "1",
                 "updated": now,
             },
-            "_steps": steps,
-            "_notes": self._notes.toPlainText().strip(),
+            "_current_task": self._current_task.text().strip(),
+            "_current_file": self._current_file.text().strip(),
+            "_next_tasks": next_lines,
+            "_blockers": blocker_lines,
         }
 
 
-class ChangelogTab(QWidget):
+class ConventionsTab(QWidget):
+    """CONVENTIONS.md — naming, file_layout, code_style, commit_style, testing, anti_patterns."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         inner = QWidget()
         layout = QVBoxLayout(inner)
         layout.setSpacing(8)
 
-        lbl = QLabel("CHANGELOG.md nie wymaga wypełnienia przy tworzeniu projektu.\nWpisy są dodawane w trakcie pracy.")
-        lbl.setStyleSheet("color: #5c6370; font-size: 11px;")
-        lbl.setWordWrap(True)
-        layout.addWidget(lbl)
+        note = QLabel("Pola mają wartości domyślne dla Pythona. Zmień tylko to, co odbiega od standardu.")
+        note.setStyleSheet("color: #5c6370; font-size: 10px;")
+        note.setWordWrap(True)
+        layout.addWidget(note)
 
-        gb, gb_lay = _group("Opcjonalny wpis startowy")
-        self._entry = QPlainTextEdit()
-        self._entry.setPlaceholderText("np. Inicjalizacja projektu")
-        self._entry.setStyleSheet(_TEXTAREA)
-        self._entry.setFixedHeight(60)
-        gb_lay.addWidget(self._entry)
-        layout.addWidget(gb)
+        _DEFAULTS = {
+            "naming": "snake_case dla plików i modułów Python\nPascalCase dla klas\nUPPER_CASE dla stałych modułowych",
+            "file_layout": "src/ — kod źródłowy\ntests/ — testy pytest\ndocs/ — dokumentacja (opcjonalnie)",
+            "code_style": "PEP 8, type hints (Python 3.12+)\nmax line 120 znaków\npathlib.Path zamiast os.path",
+            "commit_style": "feat/fix/docs/refactor/test/chore",
+            "testing": "pytest z tmp_path dla plików tymczasowych\nbrak hardkodowanych ścieżek w testach",
+            "anti_patterns": "nie hardkoduj ścieżek absolutnych\nnie pomijaj type hints\nnie używaj os.path (używaj pathlib.Path)",
+        }
+
+        self._fields: dict[str, QPlainTextEdit] = {}
+        labels = {
+            "naming": "Naming (jeden punkt na linię)",
+            "file_layout": "File Layout (jeden punkt na linię)",
+            "code_style": "Code Style (jeden punkt na linię)",
+            "commit_style": "Commit Style (jeden punkt na linię)",
+            "testing": "Testing (jeden punkt na linię)",
+            "anti_patterns": "Anti-patterns (jeden punkt na linię)",
+        }
+        for key, title in labels.items():
+            gb, gb_lay = _group(title)
+            te = QPlainTextEdit(_DEFAULTS[key])
+            te.setStyleSheet(_TEXTAREA)
+            te.setFixedHeight(60)
+            gb_lay.addWidget(te)
+            layout.addWidget(gb)
+            self._fields[key] = te
 
         layout.addStretch()
         self.setLayout(QVBoxLayout())
@@ -458,7 +405,10 @@ class ChangelogTab(QWidget):
         self.layout().setContentsMargins(4, 4, 4, 4)
 
     def get_overrides(self) -> dict:
-        return {"_entry": self._entry.toPlainText().strip()}
+        return {
+            key: [l.strip() for l in te.toPlainText().splitlines() if l.strip()]
+            for key, te in self._fields.items()
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -466,12 +416,12 @@ class ChangelogTab(QWidget):
 # ---------------------------------------------------------------------------
 
 class ProjectWizardDialog(QDialog):
-    """Multi-tab wizard for building all 5 Projektant CC project files."""
+    """Multi-tab wizard for building all 4 PCC project files."""
 
     def __init__(self, project_name: str = "", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Kreator plików projektu — Projektant CC")
-        self.setMinimumSize(620, 540)
+        self.setWindowTitle("Kreator plików projektu — PCC")
+        self.setMinimumSize(640, 560)
         self.setModal(True)
         self._result: dict[str, dict] | None = None
         self._setup_ui(project_name)
@@ -494,24 +444,19 @@ class ProjectWizardDialog(QDialog):
         )
 
         self._claude_tab = ClaudeTab()
-        self._status_tab = StatusTab()
         self._arch_tab = ArchitectureTab()
         self._plan_tab = PlanTab()
-        self._changelog_tab = ChangelogTab()
+        self._conventions_tab = ConventionsTab()
 
         self._tabs.addTab(self._claude_tab, "CLAUDE.md")
-        self._tabs.addTab(self._status_tab, "STATUS.md")
         self._tabs.addTab(self._arch_tab, "ARCHITECTURE.md")
         self._tabs.addTab(self._plan_tab, "PLAN.md")
-        self._tabs.addTab(self._changelog_tab, "CHANGELOG.md")
+        self._tabs.addTab(self._conventions_tab, "CONVENTIONS.md")
 
-        # Pre-fill project name if provided
         if project_name:
             self._claude_tab._name.setText(project_name)
-            self._status_tab._project.setText(project_name)
 
         root.addWidget(self._tabs, 1)
-
         root.addWidget(_sep())
 
         buttons = QDialogButtonBox()
@@ -526,10 +471,9 @@ class ProjectWizardDialog(QDialog):
     def _on_accept(self) -> None:
         self._result = {
             "CLAUDE.md": self._claude_tab.get_overrides(),
-            "STATUS.md": self._status_tab.get_overrides(),
             "ARCHITECTURE.md": self._arch_tab.get_overrides(),
             "PLAN.md": self._plan_tab.get_overrides(),
-            "CHANGELOG.md": self._changelog_tab.get_overrides(),
+            "CONVENTIONS.md": self._conventions_tab.get_overrides(),
         }
         self.accept()
 
@@ -543,12 +487,7 @@ class ProjectWizardDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 def build_overrides(file_data: dict, fname: str) -> dict:
-    """
-    Convert raw wizard data for one file into overrides dict
-    suitable for create_from_template(..., overrides=...).
-    """
-    from src.projektant.template_parser import build_list
-
+    """Convert raw wizard data for one file into overrides for create_from_template."""
     overrides: dict = {}
 
     if fname == "CLAUDE.md":
@@ -557,21 +496,15 @@ def build_overrides(file_data: dict, fname: str) -> dict:
             overrides["stack"] = file_data["_stack_items"]
         if file_data.get("_key_files_items"):
             overrides["key_files"] = file_data["_key_files_items"]
-        if file_data.get("_specifics_items"):
-            overrides["specifics"] = file_data["_specifics_items"]
-
-    elif fname == "STATUS.md":
-        overrides["meta"] = file_data["meta"]
-        overrides["current"] = file_data["current"]
-        if file_data.get("_next_items"):
-            overrides["next"] = file_data["_next_items"]
 
     elif fname == "ARCHITECTURE.md":
         overview = file_data.get("_overview", "")
         patterns = file_data.get("_patterns", [])
         components = file_data.get("_components", [])
-        data_flow = file_data.get("_data_flow", "")
+        ext_deps = file_data.get("_ext_deps", [])
+        constraints = file_data.get("_constraints", [])
         decisions = file_data.get("_decisions", [])
+        data_flow = file_data.get("_data_flow", "")
 
         if overview or patterns:
             combined = overview
@@ -580,6 +513,10 @@ def build_overrides(file_data: dict, fname: str) -> dict:
             overrides["overview"] = combined
         if components:
             overrides["components"] = components
+        if ext_deps:
+            overrides["external_deps"] = ext_deps
+        if constraints:
+            overrides["constraints"] = constraints
         if data_flow:
             overrides["data_flow"] = data_flow
         if decisions:
@@ -587,15 +524,29 @@ def build_overrides(file_data: dict, fname: str) -> dict:
 
     elif fname == "PLAN.md":
         overrides["meta"] = file_data["meta"]
-        if file_data.get("_steps"):
-            overrides["steps"] = file_data["_steps"]
-        if file_data.get("_notes"):
-            overrides["notes"] = file_data["_notes"]
+        current_task = file_data.get("_current_task", "")
+        current_file = file_data.get("_current_file", "")
+        if current_task:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            overrides["current"] = {
+                "task": current_task,
+                "file": current_file,
+                "started": now,
+            }
+        next_tasks = file_data.get("_next_tasks", [])
+        if next_tasks:
+            overrides["next"] = [{"done": False, "text": t, "date": ""} for t in next_tasks]
+        blockers = file_data.get("_blockers", [])
+        if blockers:
+            overrides["blockers"] = blockers
 
-    elif fname == "CHANGELOG.md":
-        entry = file_data.get("_entry", "")
-        if entry:
-            today = datetime.now().strftime("%Y-%m-%d")
-            overrides["entries"] = [{"done": False, "text": entry, "date": today}]
+    elif fname == "CONVENTIONS.md":
+        for section in ("naming", "file_layout", "code_style", "commit_style", "testing"):
+            items = file_data.get(section, [])
+            if items:
+                overrides[section] = items
+        anti = file_data.get("anti_patterns", [])
+        if anti:
+            overrides["anti_patterns"] = [{"done": False, "text": t, "date": ""} for t in anti]
 
     return overrides
