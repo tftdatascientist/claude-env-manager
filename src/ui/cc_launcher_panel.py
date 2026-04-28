@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtCore import QFileSystemWatcher, QProcess, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -24,10 +25,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QTextEdit,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTabBar,
     QTabWidget,
     QVBoxLayout,
@@ -47,6 +50,7 @@ from src.cc_launcher.launcher_config import (
 from src.cc_launcher.project_stats import ProjectStats, fmt_size, get_project_stats
 from src.cc_launcher.session_history import (
     SessionHistorySummary,
+    find_latest_transcript,
     get_session_history,
 )
 from src.cc_launcher.session_manager import (
@@ -62,9 +66,22 @@ from src.projektant.template_parser import (
 from src.utils.plan_parser import PlanData, get_section, read_plan, write_plan
 from src.ui.zadania_panel import ZadaniaPanel as _ZadaniaPanel
 from src.workflow import WorkflowRunner
+
+# SSS Module — lazy import żeby nie blokować startu CM jeśli moduł nie istnieje
+try:
+    from SSS.src.cm.sss_module.views.intake_view import IntakeView as _SSSIntakeView
+    from SSS.src.cm.sss_module.views.logs_view import LogsView as _SSSLogsView
+    from SSS.src.cm.sss_module.core.log_store import LogStore as _SSSLogStore
+    from SSS.src.cm.sss_module.core.spawner import ProjectSpawner as _SSSSpawner
+    from SSS.src.cm.sss_module.core.plan_watcher import PlanWatcher as _SSSPlanWatcher
+    from SSS.src.cm.sss_module.core.round_watcher import RoundWatcher as _SSSRoundWatcher
+    _SSS_AVAILABLE = True
+except ImportError:
+    _SSS_AVAILABLE = False
 from src.watchers.session_watcher import (
     SessionWatcher,
     TerminalSnapshot,
+    read_transcript_messages,
     read_transcript_tail,
 )
 
@@ -131,6 +148,125 @@ def _val(text: str = "—", style: str = _LBL_VAL) -> QLabel:
     lbl = QLabel(text, styleSheet=style)
     lbl.setFont(_FONT_SMALL)
     return lbl
+
+
+# ── Stałe dla konwersji DPS ──────────────────────────────────────────────────
+
+# Kanoniczne nazwy plików w projekcie DPS i ich aliasy (małe litery → kanon)
+_DPS_CANON: dict[str, str] = {
+    "claude.md":       "CLAUDE.md",
+    "architecture.md": "ARCHITECTURE.md",
+    "conventions.md":  "CONVENTIONS.md",
+    "plan.md":         "PLAN.md",
+    "readme.md":       "README.md",
+    "roadmap.md":      "ROADMAP.md",
+}
+
+# Które pliki konwertujemy sekcjami (pozostałe tylko rename)
+_DPS_CONVERTIBLE = {"CLAUDE.md", "ARCHITECTURE.md", "CONVENTIONS.md"}
+
+# Pliki rozpoznawane ale pomijane przy konwersji i rename (tylko informacyjnie)
+_DPS_READONLY = {"README.md", "ROADMAP.md"}
+
+_DPS_GEN_PROMPT: dict[str, str] = {
+    "CLAUDE.md": (
+        "Jesteś ekspertem od dokumentacji projektów programistycznych.\n"
+        "Wygeneruj plik CLAUDE.md dla projektu na podstawie poniższego kontekstu.\n\n"
+        "CLAUDE.md to instrukcja dla asystenta AI (Claude Code) — zawiera:\n"
+        "opis projektu, stack technologiczny, zasady kodowania, komendy uruchomienia,\n"
+        "strukturę katalogów i wszelkie konwencje których AI ma przestrzegać.\n\n"
+        "Format wyjściowy — format DPS z sekcjami:\n"
+        "## Nazwa sekcji\n"
+        "<!-- SECTION:slug -->\n"
+        "treść\n"
+        "<!-- /SECTION:slug -->\n\n"
+        "Użyj slugów: overview, stack, commands, structure, rules, conventions\n\n"
+        "Odpowiedz WYŁĄCZNIE treścią pliku CLAUDE.md — zero komentarzy, zero wyjaśnień.\n\n"
+        "Kontekst projektu (istniejące pliki):\n{context}"
+    ),
+    "ARCHITECTURE.md": (
+        "Jesteś ekspertem od dokumentacji projektów programistycznych.\n"
+        "Wygeneruj plik ARCHITECTURE.md dla projektu na podstawie poniższego kontekstu.\n\n"
+        "ARCHITECTURE.md opisuje strukturę techniczną projektu — moduły, warstwy,\n"
+        "przepływ danych, zależności między komponentami i decyzje architektoniczne.\n\n"
+        "Format wyjściowy — format DPS z sekcjami:\n"
+        "## Nazwa sekcji\n"
+        "<!-- SECTION:slug -->\n"
+        "treść\n"
+        "<!-- /SECTION:slug -->\n\n"
+        "Użyj slugów: overview, structure, modules, data_flow, dependencies, decisions\n\n"
+        "Odpowiedz WYŁĄCZNIE treścią pliku ARCHITECTURE.md — zero komentarzy, zero wyjaśnień.\n\n"
+        "Kontekst projektu (istniejące pliki):\n{context}"
+    ),
+    "CONVENTIONS.md": (
+        "Jesteś ekspertem od dokumentacji projektów programistycznych.\n"
+        "Wygeneruj plik CONVENTIONS.md dla projektu na podstawie poniższego kontekstu.\n\n"
+        "CONVENTIONS.md zawiera konwencje zespołowe — nazewnictwo, formatowanie kodu,\n"
+        "zasady git (branche, commity), standardy testowania, importy, komentarze.\n"
+        "Wywnioskuj konwencje z istniejących plików projektu lub zaproponuj ogólnie przyjęte.\n\n"
+        "Format wyjściowy — format DPS z sekcjami:\n"
+        "## Nazwa sekcji\n"
+        "<!-- SECTION:slug -->\n"
+        "treść\n"
+        "<!-- /SECTION:slug -->\n\n"
+        "Użyj slugów: naming, formatting, git, testing, imports, comments\n\n"
+        "Odpowiedz WYŁĄCZNIE treścią pliku CONVENTIONS.md — zero komentarzy, zero wyjaśnień.\n\n"
+        "Kontekst projektu (istniejące pliki):\n{context}"
+    ),
+}
+
+_DPS_CONV_PROMPT: dict[str, str] = {
+    "CLAUDE.md": (
+        "Jesteś narzędziem do konwersji plików CLAUDE.md.\n"
+        "Przepisz podany plik do formatu DPS, w którym każda logiczna sekcja\n"
+        "jest opakowana w znaczniki:\n"
+        "<!-- SECTION:nazwa -->\n"
+        "treść sekcji\n"
+        "<!-- /SECTION:nazwa -->\n\n"
+        "Zasady:\n"
+        "- Zachowaj CAŁĄ oryginalną treść bez zmian sensu\n"
+        "- Nagłówki ## pozostaw na miejscu; wstaw SECTION bezpośrednio pod nagłówkiem\n"
+        "- Nazwa sekcji to slug angielski bez spacji (np. stack, commands, rules, goals)\n"
+        "- Sekcje zagnieżdżone (###) wchodzą do sekcji nadrzędnej (##)\n"
+        "- Odpowiedz WYŁĄCZNIE treścią skonwertowanego pliku — zero komentarzy,\n"
+        "  zero bloków markdown, zero wyjaśnień przed ani po\n\n"
+        "Plik CLAUDE.md do skonwertowania:\n\n{content}"
+    ),
+    "ARCHITECTURE.md": (
+        "Jesteś narzędziem do konwersji plików ARCHITECTURE.md.\n"
+        "Przepisz podany plik do formatu DPS, w którym każda logiczna sekcja\n"
+        "jest opakowana w znaczniki:\n"
+        "<!-- SECTION:nazwa -->\n"
+        "treść sekcji\n"
+        "<!-- /SECTION:nazwa -->\n\n"
+        "Zasady:\n"
+        "- Zachowaj CAŁĄ oryginalną treść bez zmian sensu\n"
+        "- Nagłówki ## pozostaw na miejscu; wstaw SECTION bezpośrednio pod nagłówkiem\n"
+        "- Nazwa sekcji to slug angielski opisujący architekturę\n"
+        "  (np. overview, structure, modules, data_flow, dependencies)\n"
+        "- Sekcje zagnieżdżone (###) wchodzą do sekcji nadrzędnej (##)\n"
+        "- Odpowiedz WYŁĄCZNIE treścią skonwertowanego pliku — zero komentarzy,\n"
+        "  zero bloków markdown, zero wyjaśnień przed ani po\n\n"
+        "Plik ARCHITECTURE.md do skonwertowania:\n\n{content}"
+    ),
+    "CONVENTIONS.md": (
+        "Jesteś narzędziem do konwersji plików CONVENTIONS.md.\n"
+        "Przepisz podany plik do formatu DPS, w którym każda logiczna sekcja\n"
+        "jest opakowana w znaczniki:\n"
+        "<!-- SECTION:nazwa -->\n"
+        "treść sekcji\n"
+        "<!-- /SECTION:nazwa -->\n\n"
+        "Zasady:\n"
+        "- Zachowaj CAŁĄ oryginalną treść bez zmian sensu\n"
+        "- Nagłówki ## pozostaw na miejscu; wstaw SECTION bezpośrednio pod nagłówkiem\n"
+        "- Nazwa sekcji to slug angielski opisujący konwencje\n"
+        "  (np. naming, formatting, git, testing, imports, comments)\n"
+        "- Sekcje zagnieżdżone (###) wchodzą do sekcji nadrzędnej (##)\n"
+        "- Odpowiedz WYŁĄCZNIE treścią skonwertowanego pliku — zero komentarzy,\n"
+        "  zero bloków markdown, zero wyjaśnień przed ani po\n\n"
+        "Plik CONVENTIONS.md do skonwertowania:\n\n{content}"
+    ),
+}
 
 
 class _StatusBar(QLabel):
@@ -320,6 +456,7 @@ class ProjectSlotWidget(QWidget):
         self._save_timer.timeout.connect(self._on_debounce)
 
         self._stop_pending = False
+        self._git_init_then_round_end = False
         self._zadaniowiec_loaded = False
         self._workflow = WorkflowRunner(parent=self)
         self._workflow.operation_done.connect(self._on_workflow_done)
@@ -368,14 +505,17 @@ class ProjectSlotWidget(QWidget):
         """)
         root.addWidget(self._tabs, stretch=1)
 
+        self._tabs.addTab(self._build_historia_sesje_vibe(), "Sesje")
         self._tabs.addTab(self._build_dane(), "Dane")
         self._tabs.addTab(self._build_plan(), "ZADANIA")
         self._tabs.addTab(self._build_zadaniowiec(), "ZADANIOWIEC")
+        self._tabs.addTab(self._build_sss(), "SSS")
         self._tabs.addTab(self._build_pcc(), "PLAN.md")
         self._tabs.addTab(self._build_md_file("CLAUDE.md"), "CLAUDE.md")
         self._tabs.addTab(self._build_md_file("ARCHITECTURE.md"), "ARCHITECTURE.md")
         self._tabs.addTab(self._build_md_file("CONVENTIONS.md"), "CONVENTIONS.md")
-        self._tabs.addTab(self._build_historia_sesje_vibe(), "Sesje")
+        self._tabs.addTab(self._build_logi(), "Logi")
+        self._tabs.addTab(self._build_full_converter(), "Full Converter")
 
         root.addWidget(_sep())
         root.addWidget(self._build_action_bar())
@@ -556,6 +696,94 @@ class ProjectSlotWidget(QWidget):
         self._zadaniowiec = _ZadaniaPanel()
         return self._zadaniowiec
 
+    # ---- SSS ----------------------------------------------------------- #
+
+    def _build_sss(self) -> QWidget:
+        if not _SSS_AVAILABLE:
+            w = QWidget()
+            lay = QVBoxLayout(w)
+            lay.addWidget(QLabel("Moduł SSS niedostępny (błąd importu)."))
+            return w
+
+        db_path = Path.home() / ".claude" / "sss_events.db"
+        self._sss_store = _SSSLogStore(db_path)
+        self._sss_spawner = _SSSSpawner()
+        self._sss_plan_watcher: "_SSSPlanWatcher | None" = None
+        self._sss_round_watcher: "_SSSRoundWatcher | None" = None
+        self._sss_active_session: str | None = None
+
+        w = QWidget()
+        root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+
+        self._sss_intake = _SSSIntakeView()
+        self._sss_intake.qt_start_clicked.connect(self._on_sss_start)
+        splitter.addWidget(self._sss_intake)
+
+        self._sss_logs = _SSSLogsView(self._sss_store)
+        self._sss_logs.refresh_sessions()
+        splitter.addWidget(self._sss_logs)
+        splitter.setSizes([280, 320])
+
+        root.addWidget(splitter)
+        return w
+
+    def _sss_start_watchers(self, project_dir: Path, session_id: str) -> None:
+        if not _SSS_AVAILABLE:
+            return
+        self._sss_stop_watchers()
+        self._sss_active_session = session_id
+
+        plan_path = project_dir / "PLAN.md"
+        self._sss_plan_watcher = _SSSPlanWatcher(plan_path, parent=self)
+        self._sss_plan_watcher.qt_plan_changed.connect(self._on_sss_plan_changed)
+        self._sss_plan_watcher.qt_plan_error.connect(
+            lambda msg: self._sss_store.insert_event(session_id, "plan_error", payload={"error": msg})
+        )
+
+        self._sss_round_watcher = _SSSRoundWatcher(project_dir, parent=self)
+        self._sss_round_watcher.qt_md_read.connect(
+            lambda fname, _content: self._sss_store.insert_event(
+                session_id, "md_read", file_path=fname
+            )
+        )
+        self._sss_plan_watcher.qt_plan_changed.connect(self._sss_round_watcher.on_plan_changed)
+        self._sss_plan_watcher.start()
+
+    def _sss_stop_watchers(self) -> None:
+        if self._sss_plan_watcher is not None:
+            self._sss_plan_watcher.stop()
+            self._sss_plan_watcher.deleteLater()
+            self._sss_plan_watcher = None
+        self._sss_round_watcher = None
+        self._sss_active_session = None
+
+    def _on_sss_start(self, prompt: str, project_name: str, location: str) -> None:
+        try:
+            session_id, project_dir = self._sss_spawner.spawn(prompt, project_name, Path(location))
+            self._sss_store.insert_event(session_id, "spawn", payload={
+                "project_name": project_name,
+                "location": location,
+                "prompt_preview": prompt[:120],
+            })
+            self._sss_logs.refresh_sessions()
+            self._sss_start_watchers(project_dir, session_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "SSS — błąd startu", str(exc))
+
+    def _on_sss_plan_changed(self, sections: dict) -> None:
+        if not self._sss_active_session:
+            return
+        current = sections.get("current", "")
+        self._sss_store.insert_event(
+            self._sss_active_session,
+            "plan_change",
+            payload={"current": current[:200]},
+        )
+
     # ---- CLAUDE.md / ARCHITECTURE.md / CONVENTIONS.md ----------------- #
 
     _RE_HEADING = re.compile(r"^(#{2,3})\s+(.+)$", re.MULTILINE)
@@ -627,7 +855,18 @@ class ProjectSlotWidget(QWidget):
         cl_lay.addWidget(changelog_view)
         splitter.addWidget(changelog_frame)
 
-        splitter.setSizes([420, 130])
+        sizes = [420, 130]
+
+        if filename in _DPS_CONVERTIBLE:
+            # Stacked: 0 = konwerter (plik istnieje), 1 = generator (brak pliku)
+            action_stack = QStackedWidget()
+            action_stack.addWidget(self._build_md_converter(filename))
+            action_stack.addWidget(self._build_md_generator(filename))
+            splitter.addWidget(action_stack)
+            sizes.append(260)
+            setattr(self, f"_md_action_stack_{filename.replace('.', '_')}", action_stack)
+
+        splitter.setSizes(sizes)
         root.addWidget(splitter, stretch=1)
 
         # Przechowaj referencje jako atrybuty slotu
@@ -638,6 +877,237 @@ class ProjectSlotWidget(QWidget):
         btn_refresh.clicked.connect(lambda: self._reload_md_file(filename))
 
         return w
+
+    def _build_md_generator(self, filename: str) -> QWidget:
+        """Panel generowania pliku MD od zera przez AI (widoczny gdy plik nie istnieje)."""
+        safe = filename.replace(".", "_")
+
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame{background:#0d1a12;border:1px solid #1a4a2a;border-radius:4px;}"
+        )
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(10, 8, 10, 10)
+        lay.setSpacing(6)
+
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel(f"Generuj {filename} od zera", styleSheet=_LBL_HEAD))
+        hdr.addStretch()
+        gen_badge = QLabel("")
+        gen_badge.setVisible(False)
+        hdr.addWidget(gen_badge)
+        lay.addLayout(hdr)
+
+        desc = QLabel(
+            f"Plik {filename} nie istnieje w projekcie.\n"
+            "AI wygeneruje go od zera na podstawie pozostałych plików MD projektu "
+            "oraz ogólnie przyjętych standardów. Wynik pojawi się poniżej — "
+            "sprawdź go przed zapisem."
+        )
+        desc.setStyleSheet("color:#6b7280;font-size:10px;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        lay.addWidget(_sep())
+
+        gen_output = QPlainTextEdit()
+        gen_output.setReadOnly(True)
+        gen_output.setFont(_FONT_MONO)
+        gen_output.setFixedHeight(80)
+        gen_output.setStyleSheet(
+            "QPlainTextEdit{background:#0d1117;color:#61afef;"
+            "border:1px solid #1a3a4a;border-radius:3px;padding:4px;}"
+        )
+        gen_output.setPlaceholderText(f"Tutaj pojawi się wygenerowana treść {filename}…")
+        lay.addWidget(gen_output)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        btn_gen_run = QPushButton("✦  Generuj przez AI")
+        btn_gen_run.setStyleSheet(
+            "QPushButton{background:#1a2a3a;color:#61afef;"
+            "border:1px solid #2a4a6a;border-radius:3px;padding:5px 14px;font-weight:bold}"
+            "QPushButton:hover{background:#2a4a6a}"
+            "QPushButton:disabled{color:#5c5c5c;border-color:#383838}"
+        )
+        btn_row.addWidget(btn_gen_run)
+
+        btn_gen_stop = QPushButton("■  Stop")
+        btn_gen_stop.setStyleSheet(
+            "QPushButton{background:#3a2a00;color:#e5c07b;"
+            "border:1px solid #5a4000;border-radius:3px;padding:5px 12px}"
+            "QPushButton:hover{background:#5a4000}"
+        )
+        btn_gen_stop.setEnabled(False)
+        btn_row.addWidget(btn_gen_stop)
+
+        btn_gen_save = QPushButton(f"→ Zapisz jako {filename}")
+        btn_gen_save.setStyleSheet(_BTN_GREEN)
+        btn_gen_save.setEnabled(False)
+        btn_row.addWidget(btn_gen_save)
+
+        btn_row.addStretch()
+        gen_status = QLabel("", styleSheet=_LBL_DIM)
+        gen_status.setFont(_FONT_SMALL)
+        btn_row.addWidget(gen_status)
+        lay.addLayout(btn_row)
+
+        # Zapisz referencje
+        setattr(self, f"_gen_output_{safe}", gen_output)
+        setattr(self, f"_gen_btn_run_{safe}", btn_gen_run)
+        setattr(self, f"_gen_btn_stop_{safe}", btn_gen_stop)
+        setattr(self, f"_gen_btn_save_{safe}", btn_gen_save)
+        setattr(self, f"_gen_status_{safe}", gen_status)
+        setattr(self, f"_gen_badge_{safe}", gen_badge)
+        setattr(self, f"_gen_process_{safe}", None)
+        setattr(self, f"_gen_buffer_{safe}", "")
+
+        btn_gen_run.clicked.connect(lambda: self._gen_run(filename))
+        btn_gen_stop.clicked.connect(lambda: self._gen_stop(filename))
+        btn_gen_save.clicked.connect(lambda: self._gen_save(filename))
+
+        return frame
+
+    def _gen_run(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        gen_output: QPlainTextEdit = getattr(self, f"_gen_output_{safe}")
+        btn_run: QPushButton = getattr(self, f"_gen_btn_run_{safe}")
+        btn_stop: QPushButton = getattr(self, f"_gen_btn_stop_{safe}")
+        btn_save: QPushButton = getattr(self, f"_gen_btn_save_{safe}")
+        status: QLabel = getattr(self, f"_gen_status_{safe}")
+
+        project_path = self._path_edit.toPlainText().strip()
+        if not project_path:
+            status.setText("Brak ścieżki projektu")
+            return
+
+        cc = shutil.which("cc") or shutil.which("claude")
+        if not cc:
+            QMessageBox.warning(self, "Brak cc",
+                                "Nie znaleziono 'cc' ani 'claude' w PATH.")
+            return
+
+        context = _build_project_context(Path(project_path), exclude=filename)
+        prompt = _DPS_GEN_PROMPT.get(filename, _DPS_GEN_PROMPT["CLAUDE.md"]).format(
+            context=context
+        )
+
+        setattr(self, f"_gen_buffer_{safe}", "")
+        gen_output.clear()
+        btn_run.setEnabled(False)
+        btn_stop.setEnabled(True)
+        btn_save.setEnabled(False)
+        status.setText("Generowanie…")
+
+        proc = QProcess(self)
+        proc.readyReadStandardOutput.connect(lambda: self._gen_on_stdout(filename))
+        proc.readyReadStandardError.connect(lambda: self._gen_on_stderr(filename))
+        proc.finished.connect(lambda code, _: self._gen_on_finished(filename, code))
+        setattr(self, f"_gen_process_{safe}", proc)
+        if not _start_cc_with_prompt(proc, cc, prompt):
+            status.setText("Błąd startu procesu")
+            btn_run.setEnabled(True)
+            btn_stop.setEnabled(False)
+
+    def _gen_on_stdout(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        proc: QProcess | None = getattr(self, f"_gen_process_{safe}", None)
+        if not proc:
+            return
+        gen_output: QPlainTextEdit = getattr(self, f"_gen_output_{safe}")
+        raw = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                chunk = ""
+                if obj.get("type") == "content_block_delta":
+                    chunk = obj.get("delta", {}).get("text", "")
+                elif obj.get("type") == "text":
+                    chunk = obj.get("text", "")
+                elif obj.get("type") == "result":
+                    chunk = obj.get("result", "")
+                if chunk:
+                    buf = getattr(self, f"_gen_buffer_{safe}", "") + chunk
+                    setattr(self, f"_gen_buffer_{safe}", buf)
+                    gen_output.moveCursor(QTextCursor.MoveOperation.End)
+                    gen_output.insertPlainText(chunk)
+            except (json.JSONDecodeError, KeyError):
+                buf = getattr(self, f"_gen_buffer_{safe}", "") + line + "\n"
+                setattr(self, f"_gen_buffer_{safe}", buf)
+                gen_output.moveCursor(QTextCursor.MoveOperation.End)
+                gen_output.insertPlainText(line + "\n")
+
+    def _gen_on_stderr(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        proc: QProcess | None = getattr(self, f"_gen_process_{safe}", None)
+        if not proc:
+            return
+        gen_output: QPlainTextEdit = getattr(self, f"_gen_output_{safe}")
+        raw = bytes(proc.readAllStandardError()).decode("utf-8", errors="replace")
+        if raw.strip():
+            gen_output.moveCursor(QTextCursor.MoveOperation.End)
+            gen_output.insertPlainText(f"\n[STDERR] {raw}")
+
+    def _gen_on_finished(self, filename: str, exit_code: int) -> None:
+        safe = filename.replace(".", "_")
+        btn_run: QPushButton = getattr(self, f"_gen_btn_run_{safe}")
+        btn_stop: QPushButton = getattr(self, f"_gen_btn_stop_{safe}")
+        btn_save: QPushButton = getattr(self, f"_gen_btn_save_{safe}")
+        status: QLabel = getattr(self, f"_gen_status_{safe}")
+        has = bool(getattr(self, f"_gen_buffer_{safe}", "").strip())
+        btn_run.setEnabled(True)
+        btn_stop.setEnabled(False)
+        btn_save.setEnabled(has)
+        status.setText("Gotowe — sprawdź i kliknij Zapisz" if has else f"Błąd (kod {exit_code})")
+
+    def _gen_stop(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        proc: QProcess | None = getattr(self, f"_gen_process_{safe}", None)
+        status: QLabel = getattr(self, f"_gen_status_{safe}")
+        btn_run: QPushButton = getattr(self, f"_gen_btn_run_{safe}")
+        btn_stop: QPushButton = getattr(self, f"_gen_btn_stop_{safe}")
+        if proc and proc.state() != QProcess.ProcessState.NotRunning:
+            proc.kill()
+            status.setText("Przerwano")
+        btn_run.setEnabled(True)
+        btn_stop.setEnabled(False)
+
+    def _gen_save(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        status: QLabel = getattr(self, f"_gen_status_{safe}")
+        btn_save: QPushButton = getattr(self, f"_gen_btn_save_{safe}")
+        badge: QLabel = getattr(self, f"_gen_badge_{safe}")
+        content = getattr(self, f"_gen_buffer_{safe}", "").strip()
+        if not content:
+            return
+        project_path = self._path_edit.toPlainText().strip()
+        if not project_path:
+            return
+        target = Path(project_path) / filename
+        try:
+            target.write_text(content, encoding="utf-8")
+        except OSError as e:
+            QMessageBox.critical(self, "Błąd zapisu", str(e))
+            return
+        status.setText(f"Zapisano {filename}")
+        badge.setText("Wygenerowano")
+        badge.setStyleSheet(
+            "background:#1a2a3a;color:#61afef;border-radius:3px;"
+            "padding:2px 8px;font-size:10px;font-weight:bold;"
+        )
+        badge.setVisible(True)
+        btn_save.setEnabled(False)
+        # Przełącz stack na konwerter i odśwież
+        action_stack: QStackedWidget | None = getattr(
+            self, f"_md_action_stack_{safe}", None
+        )
+        if action_stack:
+            action_stack.setCurrentIndex(0)
+        self._reload_md_file(filename)
 
     def _reload_md_file(self, filename: str) -> None:
         """Wczytuje plik MD, parsuje sekcje, wykrywa zmiany i odświeża widok."""
@@ -656,14 +1126,24 @@ class ProjectSlotWidget(QWidget):
         if path_lbl:
             path_lbl.setText(str(file_path))
 
+        # Przełącz stack między konwerterem a generatorem
+        action_stack: QStackedWidget | None = getattr(
+            self, f"_md_action_stack_{safe}", None
+        )
         if not file_path.exists():
+            if action_stack:
+                action_stack.setCurrentIndex(1)  # generator
             if sections_layout:
                 self._clear_sections_layout(sections_layout)
-                lbl = QLabel(f"Plik {filename} nie istnieje w katalogu projektu.",
-                             styleSheet=_LBL_WARN)
+                lbl = QLabel(
+                    f"Plik {filename} nie istnieje — użyj panelu poniżej aby go wygenerować.",
+                    styleSheet=_LBL_WARN,
+                )
                 lbl.setWordWrap(True)
                 sections_layout.insertWidget(sections_layout.count() - 1, lbl)
             return
+        if action_stack:
+            action_stack.setCurrentIndex(0)  # konwerter
 
         current_text = file_path.read_text(encoding="utf-8")
 
@@ -776,6 +1256,266 @@ class ProjectSlotWidget(QWidget):
                 break
         view.setPlainText("\n".join(entries) if entries else "(brak zmian dla tego pliku)")
 
+    # ---- Konwersja MD → DPS (generyczna dla CLAUDE / ARCHITECTURE / CONVENTIONS) #
+
+    _CONV_PROMPTS: dict[str, str] = _DPS_CONV_PROMPT
+
+    # Stan konwersji — słowniki per filename (safe key)
+    _conv_processes: dict[str, QProcess] = {}
+    _conv_buffers: dict[str, str] = {}
+
+    def _build_md_converter(self, filename: str) -> QWidget:
+        """Panel konwersji danego pliku MD do formatu DPS."""
+        safe = filename.replace(".", "_")
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame{background:#12141a;border:1px solid #3c3c3c;border-radius:4px;}"
+        )
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(10, 8, 10, 10)
+        lay.setSpacing(6)
+
+        # Nagłówek
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel("Konwersja do formatu DPS", styleSheet=_LBL_HEAD))
+        hdr.addStretch()
+        badge = QLabel("")
+        badge.setVisible(False)
+        hdr.addWidget(badge)
+        lay.addLayout(hdr)
+
+        desc = QLabel(
+            f"Konwertuje {filename} do formatu zgodnego z modułem Projektant — "
+            f"każda sekcja zostanie opakowana w znaczniki <!-- SECTION:nazwa -->.\n"
+            f"Oryginał zostanie zachowany w _no_dps/<nazwa>__<projekt>.md."
+        )
+        desc.setStyleSheet("color:#6b7280;font-size:10px;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        lay.addWidget(_sep())
+
+        # Podgląd
+        output = QPlainTextEdit()
+        output.setReadOnly(True)
+        output.setFont(_FONT_MONO)
+        output.setFixedHeight(80)
+        output.setStyleSheet(
+            "QPlainTextEdit{background:#0d1117;color:#98c379;"
+            "border:1px solid #2a3a2a;border-radius:3px;padding:4px;}"
+        )
+        output.setPlaceholderText(f"Tutaj pojawi się skonwertowana treść {filename}…")
+        lay.addWidget(output)
+
+        # Przyciski
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        btn_run = QPushButton("✦  Konwertuj przez AI")
+        btn_run.setStyleSheet(
+            "QPushButton{background:#2a1a3a;color:#c678dd;"
+            "border:1px solid #4a2a5a;border-radius:3px;padding:5px 14px;font-weight:bold}"
+            "QPushButton:hover{background:#4a2a5a}"
+            "QPushButton:disabled{color:#5c5c5c;border-color:#383838}"
+        )
+        btn_row.addWidget(btn_run)
+
+        btn_stop = QPushButton("■  Stop")
+        btn_stop.setStyleSheet(
+            "QPushButton{background:#3a2a00;color:#e5c07b;"
+            "border:1px solid #5a4000;border-radius:3px;padding:5px 12px}"
+            "QPushButton:hover{background:#5a4000}"
+        )
+        btn_stop.setEnabled(False)
+        btn_row.addWidget(btn_stop)
+
+        btn_apply = QPushButton(f"→ Zapisz jako {filename}")
+        btn_apply.setStyleSheet(_BTN_GREEN)
+        btn_apply.setEnabled(False)
+        btn_row.addWidget(btn_apply)
+
+        btn_row.addStretch()
+        status_lbl = QLabel("", styleSheet=_LBL_DIM)
+        status_lbl.setFont(_FONT_SMALL)
+        btn_row.addWidget(status_lbl)
+        lay.addLayout(btn_row)
+
+        # Zapisz referencje potrzebne w callbackach
+        setattr(self, f"_conv_output_{safe}", output)
+        setattr(self, f"_conv_btn_run_{safe}", btn_run)
+        setattr(self, f"_conv_btn_stop_{safe}", btn_stop)
+        setattr(self, f"_conv_btn_apply_{safe}", btn_apply)
+        setattr(self, f"_conv_status_{safe}", status_lbl)
+        setattr(self, f"_conv_badge_{safe}", badge)
+
+        btn_run.clicked.connect(lambda: self._conv_run(filename))
+        btn_stop.clicked.connect(lambda: self._conv_stop(filename))
+        btn_apply.clicked.connect(lambda: self._conv_apply(filename))
+
+        return frame
+
+    def _conv_run(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        output: QPlainTextEdit = getattr(self, f"_conv_output_{safe}")
+        btn_run: QPushButton = getattr(self, f"_conv_btn_run_{safe}")
+        btn_stop: QPushButton = getattr(self, f"_conv_btn_stop_{safe}")
+        btn_apply: QPushButton = getattr(self, f"_conv_btn_apply_{safe}")
+        status_lbl: QLabel = getattr(self, f"_conv_status_{safe}")
+        badge: QLabel = getattr(self, f"_conv_badge_{safe}")
+
+        project_path = self._path_edit.toPlainText().strip()
+        if not project_path:
+            status_lbl.setText("Brak ścieżki projektu")
+            return
+
+        md_path = Path(project_path) / filename
+        if not md_path.exists():
+            status_lbl.setText(f"Brak pliku {filename} w projekcie")
+            return
+
+        cc = shutil.which("cc") or shutil.which("claude")
+        if not cc:
+            QMessageBox.warning(
+                self, "Brak cc",
+                "Nie znaleziono polecenia 'cc' ani 'claude' w PATH.\n"
+                "Zainstaluj Claude Code CLI lub dodaj go do PATH.",
+            )
+            return
+
+        content = md_path.read_text(encoding="utf-8")
+        if "<!-- SECTION:" in content:
+            reply = QMessageBox.question(
+                self, "Już DPS?",
+                f"Plik {filename} wygląda na już skonwertowany (zawiera znaczniki SECTION).\n"
+                "Konwertować ponownie?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        prompt_template = self._CONV_PROMPTS.get(filename, self._CONV_PROMPTS["CLAUDE.md"])
+        prompt = prompt_template.format(content=content)
+
+        self._conv_buffers[safe] = ""
+        output.clear()
+        btn_run.setEnabled(False)
+        btn_stop.setEnabled(True)
+        btn_apply.setEnabled(False)
+        status_lbl.setText("Konwertowanie…")
+        badge.setVisible(False)
+
+        proc = QProcess(self)
+        proc.readyReadStandardOutput.connect(lambda: self._conv_on_stdout(filename))
+        proc.readyReadStandardError.connect(lambda: self._conv_on_stderr(filename))
+        proc.finished.connect(lambda code, _: self._conv_on_finished(filename, code))
+        self._conv_processes[safe] = proc
+        if not _start_cc_with_prompt(proc, cc, prompt):
+            status_lbl.setText("Błąd startu procesu")
+            btn_run.setEnabled(True)
+            btn_stop.setEnabled(False)
+
+    def _conv_on_stdout(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        proc = self._conv_processes.get(safe)
+        if not proc:
+            return
+        output: QPlainTextEdit = getattr(self, f"_conv_output_{safe}")
+        raw = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                chunk = ""
+                if obj.get("type") == "content_block_delta":
+                    chunk = obj.get("delta", {}).get("text", "")
+                elif obj.get("type") == "text":
+                    chunk = obj.get("text", "")
+                elif obj.get("type") == "result":
+                    chunk = obj.get("result", "")
+                if chunk:
+                    self._conv_buffers[safe] = self._conv_buffers.get(safe, "") + chunk
+                    output.moveCursor(QTextCursor.MoveOperation.End)
+                    output.insertPlainText(chunk)
+            except (json.JSONDecodeError, KeyError):
+                self._conv_buffers[safe] = self._conv_buffers.get(safe, "") + line + "\n"
+                output.moveCursor(QTextCursor.MoveOperation.End)
+                output.insertPlainText(line + "\n")
+
+    def _conv_on_stderr(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        proc = self._conv_processes.get(safe)
+        if not proc:
+            return
+        output: QPlainTextEdit = getattr(self, f"_conv_output_{safe}")
+        raw = bytes(proc.readAllStandardError()).decode("utf-8", errors="replace")
+        if raw.strip():
+            output.moveCursor(QTextCursor.MoveOperation.End)
+            output.insertPlainText(f"\n[STDERR] {raw}")
+
+    def _conv_on_finished(self, filename: str, exit_code: int) -> None:
+        safe = filename.replace(".", "_")
+        btn_run: QPushButton = getattr(self, f"_conv_btn_run_{safe}")
+        btn_stop: QPushButton = getattr(self, f"_conv_btn_stop_{safe}")
+        btn_apply: QPushButton = getattr(self, f"_conv_btn_apply_{safe}")
+        status_lbl: QLabel = getattr(self, f"_conv_status_{safe}")
+        has_output = bool(self._conv_buffers.get(safe, "").strip())
+        btn_run.setEnabled(True)
+        btn_stop.setEnabled(False)
+        btn_apply.setEnabled(has_output)
+        if exit_code == 0 and has_output:
+            status_lbl.setText("Gotowe — sprawdź podgląd i kliknij Zapisz")
+        else:
+            status_lbl.setText(
+                f"Zakończono (kod {exit_code})" if exit_code != 0 else "Brak wyjścia AI"
+            )
+
+    def _conv_stop(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        proc = self._conv_processes.get(safe)
+        status_lbl: QLabel = getattr(self, f"_conv_status_{safe}")
+        btn_run: QPushButton = getattr(self, f"_conv_btn_run_{safe}")
+        btn_stop: QPushButton = getattr(self, f"_conv_btn_stop_{safe}")
+        if proc and proc.state() != QProcess.ProcessState.NotRunning:
+            proc.kill()
+            status_lbl.setText("Przerwano")
+        btn_run.setEnabled(True)
+        btn_stop.setEnabled(False)
+
+    def _conv_apply(self, filename: str) -> None:
+        safe = filename.replace(".", "_")
+        status_lbl: QLabel = getattr(self, f"_conv_status_{safe}")
+        btn_apply: QPushButton = getattr(self, f"_conv_btn_apply_{safe}")
+        badge: QLabel = getattr(self, f"_conv_badge_{safe}")
+
+        project_path = self._path_edit.toPlainText().strip()
+        if not project_path:
+            return
+        new_content = self._conv_buffers.get(safe, "").strip()
+        if not new_content:
+            return
+
+        md_path = Path(project_path) / filename
+
+        try:
+            backup_path = _backup_original(md_path) if md_path.exists() else None
+            md_path.write_text(new_content, encoding="utf-8")
+        except OSError as e:
+            QMessageBox.critical(self, "Błąd zapisu", str(e))
+            return
+
+        backup_info = f"_no_dps/{backup_path.name}" if backup_path else "brak oryginału"
+        status_lbl.setText(f"Zapisano · oryginał → {backup_info}")
+        badge.setText("DPS")
+        badge.setStyleSheet(
+            "background:#1a3a1a;color:#98c379;border-radius:3px;"
+            "padding:2px 8px;font-size:10px;font-weight:bold;"
+        )
+        badge.setVisible(True)
+        btn_apply.setEnabled(False)
+        self._reload_md_file(filename)
+
     # ---- PCC ----------------------------------------------------------- #
 
     def _build_pcc(self) -> QWidget:
@@ -882,16 +1622,168 @@ class ProjectSlotWidget(QWidget):
         outer.addWidget(scroll, stretch=1)
         return w
 
+    # ---- Logi Python -------------------------------------------------- #
+
+    _RUN_LOG_PATH = Path.home() / ".claude" / "run_log.json"
+
+    def _build_logi(self) -> QWidget:
+        """Zakładka Logi — wywołania skryptów Pythona z run_log.json."""
+        w = QWidget()
+        root = QVBoxLayout(w)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        # Nagłówek z licznikiem i przyciskiem odśwież
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel("Uruchomienia skryptów Pythona (CC)", styleSheet=_LBL_HEAD))
+        hdr.addStretch()
+        self._logi_count_lbl = QLabel("", styleSheet=_LBL_DIM)
+        self._logi_count_lbl.setFont(_FONT_SMALL)
+        hdr.addWidget(self._logi_count_lbl)
+        btn_refresh = QPushButton("⟳")
+        btn_refresh.setFixedWidth(28)
+        btn_refresh.setStyleSheet(_BTN)
+        btn_refresh.clicked.connect(self.reload_logi)
+        hdr.addWidget(btn_refresh)
+        root.addLayout(hdr)
+
+        # Pole tekstowe z wpisami
+        self._logi_view = QPlainTextEdit()
+        self._logi_view.setReadOnly(True)
+        self._logi_view.setFont(_FONT_MONO)
+        self._logi_view.setStyleSheet(
+            "QPlainTextEdit{background:#0d1117;color:#cccccc;"
+            "border:1px solid #3c3c3c;border-radius:3px;padding:6px}"
+        )
+        self._logi_view.setPlaceholderText(
+            "(brak wpisów — skrypty Python uruchamiane przez CC pojawią się tutaj)"
+        )
+        root.addWidget(self._logi_view, stretch=1)
+
+        # Statystyki na dole
+        stats_frame = QFrame()
+        stats_frame.setStyleSheet(_CARD)
+        sl = QHBoxLayout(stats_frame)
+        sl.setContentsMargins(8, 4, 8, 4)
+        self._logi_total_lbl = _val("Łącznie: —")
+        self._logi_last_lbl = _val("Ostatnie: —", _LBL_DIM)
+        self._logi_session_lbl = _val("Projekt: —", _LBL_DIM)
+        sl.addWidget(self._logi_total_lbl)
+        sl.addWidget(QLabel(" | ", styleSheet=_LBL_DIM))
+        sl.addWidget(self._logi_last_lbl)
+        sl.addWidget(QLabel(" | ", styleSheet=_LBL_DIM))
+        sl.addWidget(self._logi_session_lbl)
+        sl.addStretch()
+        root.addWidget(stats_frame)
+
+        # Watcher na run_log.json
+        self._logi_watcher = QFileSystemWatcher(w)
+        if self._RUN_LOG_PATH.exists():
+            self._logi_watcher.addPath(str(self._RUN_LOG_PATH))
+        self._logi_watcher.fileChanged.connect(self._on_logi_changed)
+
+        # Polling gdy plik jeszcze nie istnieje
+        self._logi_poll = QTimer(w)
+        self._logi_poll.setInterval(10_000)
+        self._logi_poll.timeout.connect(self._logi_poll_tick)
+        if not self._RUN_LOG_PATH.exists():
+            self._logi_poll.start()
+
+        return w
+
+    def _logi_poll_tick(self) -> None:
+        if self._RUN_LOG_PATH.exists():
+            self._logi_watcher.addPath(str(self._RUN_LOG_PATH))
+            self._logi_poll.stop()
+            self.reload_logi()
+
+    def _on_logi_changed(self, path: str) -> None:
+        # Re-podepnij po nadpisaniu pliku (QFileSystemWatcher traci ścieżkę)
+        if path not in self._logi_watcher.files():
+            if Path(path).exists():
+                self._logi_watcher.addPath(path)
+        self.reload_logi()
+
+    def reload_logi(self) -> None:
+        """Wczytaj run_log.json i wyświetl wpisy pasujące do cwd tego slotu."""
+        project_path = self._path_edit.toPlainText().strip()
+
+        if not self._RUN_LOG_PATH.exists():
+            self._logi_view.setPlainText("(plik run_log.json jeszcze nie istnieje)")
+            self._logi_count_lbl.setText("")
+            self._logi_total_lbl.setText("Łącznie: 0")
+            self._logi_last_lbl.setText("Ostatnie: —")
+            self._logi_session_lbl.setText("Projekt: —")
+            return
+
+        try:
+            all_entries = json.loads(self._RUN_LOG_PATH.read_text(encoding="utf-8"))
+            if not isinstance(all_entries, list):
+                all_entries = []
+        except Exception:
+            all_entries = []
+
+        # Filtruj po cwd jeśli ścieżka projektu jest ustawiona
+        if project_path:
+            norm_proj = Path(project_path).resolve()
+            def _matches(e: dict) -> bool:
+                cwd = e.get("cwd", "")
+                if not cwd:
+                    return False
+                try:
+                    return Path(cwd).resolve() == norm_proj
+                except Exception:
+                    return False
+            entries = [e for e in all_entries if _matches(e)]
+        else:
+            entries = list(all_entries)
+
+        total_all = len(all_entries)
+        total_proj = len(entries)
+
+        # Nagłówek licznika
+        if project_path:
+            proj_name = Path(project_path).name
+            self._logi_count_lbl.setText(
+                f"{total_proj} dla projektu  ·  {total_all} łącznie"
+            )
+            self._logi_session_lbl.setText(f"Projekt: {proj_name}")
+        else:
+            self._logi_count_lbl.setText(f"{total_all} łącznie")
+            self._logi_session_lbl.setText("Projekt: (wszystkie)")
+
+        self._logi_total_lbl.setText(f"Łącznie wywołań: {total_proj}")
+
+        if entries:
+            last = entries[-1]
+            self._logi_last_lbl.setText(f"Ostatnie: {last.get('ts', '—')}")
+        else:
+            self._logi_last_lbl.setText("Ostatnie: —")
+
+        # Renderuj wpisy — od najnowszego
+        lines = []
+        for e in reversed(entries):
+            ts = e.get("ts", "")
+            cmd = e.get("cmd", "").strip()
+            cwd = e.get("cwd", "")
+            short_cwd = Path(cwd).name if cwd else ""
+            lines.append(f"{ts}  [{short_cwd}]\n  > {cmd}\n")
+
+        self._logi_view.setPlainText("\n".join(lines) if lines else "(brak wywołań dla tego projektu)")
+        # Przewiń na górę (najnowsze)
+        self._logi_view.moveCursor(QTextCursor.MoveOperation.Start)
+
     # ---- Historia ------------------------------------------------------ #
+
 
     def _build_historia(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(6)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(4)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("Historia bieżącej sesji:", styleSheet=_LBL_HEAD))
+        top.addWidget(QLabel("Historia sesji:", styleSheet=_LBL_HEAD))
         top.addStretch()
         self._btn_hist_refresh = QPushButton("⟳")
         self._btn_hist_refresh.setFixedWidth(28)
@@ -899,20 +1791,16 @@ class ProjectSlotWidget(QWidget):
         top.addWidget(self._btn_hist_refresh)
         lay.addLayout(top)
 
-        lay.addWidget(QLabel("Ostatnia wiadomość CC:", styleSheet=_LBL_KEY))
-        self._last_msg = QPlainTextEdit()
-        self._last_msg.setReadOnly(True)
-        self._last_msg.setFont(_FONT_MONO)
-        self._last_msg.setFixedHeight(72)
-        self._last_msg.setPlaceholderText("—")
-        lay.addWidget(self._last_msg)
-
-        lay.addWidget(QLabel("Ostatnie wpisy transkryptu:", styleSheet=_LBL_KEY))
         self._transcript = QPlainTextEdit()
         self._transcript.setReadOnly(True)
         self._transcript.setFont(_FONT_MONO)
-        self._transcript.setPlaceholderText("—")
+        self._transcript.setStyleSheet(
+            "QPlainTextEdit{background:#141414;color:#cccccc;border:none;padding:4px;}"
+        )
+        self._transcript.setPlaceholderText("(brak wpisów transkryptu)")
         lay.addWidget(self._transcript, stretch=1)
+
+        self._last_msg = self._transcript
         return w
 
     # ---- Sesje --------------------------------------------------------- #
@@ -920,30 +1808,77 @@ class ProjectSlotWidget(QWidget):
     def _build_sesje(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(6)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
 
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Historia sesji projektu:", styleSheet=_LBL_HEAD))
-        top.addStretch()
-        self._btn_sesje_refresh = QPushButton("⟳")
-        self._btn_sesje_refresh.setFixedWidth(28)
+        # Pasek narzędzi
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(8, 4, 8, 4)
+        self._lbl_sesje_path = QLabel("", styleSheet=_LBL_DIM)
+        self._lbl_sesje_path.setFont(_FONT_MONO)
+        toolbar.addWidget(self._lbl_sesje_path, stretch=1)
+        self._btn_sesje_refresh = QPushButton("⟳  Odśwież")
         self._btn_sesje_refresh.setStyleSheet(_BTN)
-        top.addWidget(self._btn_sesje_refresh)
-        lay.addLayout(top)
+        self._btn_sesje_refresh.setFixedWidth(90)
+        toolbar.addWidget(self._btn_sesje_refresh)
+        lay.addLayout(toolbar)
 
-        sum_card = QFrame()
-        sum_card.setStyleSheet(_CARD)
-        sum_lay = QVBoxLayout(sum_card)
-        sum_lay.setContentsMargins(8, 6, 8, 6)
-        sum_lay.setSpacing(2)
-        self._lbl_cc_sessions = _val()
-        self._lbl_cc_last = _val()
-        sum_lay.addLayout(_kv_row("Sesje CC (pliki):", self._lbl_cc_sessions))
-        sum_lay.addLayout(_kv_row("Ostatnia CC:", self._lbl_cc_last))
-        lay.addWidget(sum_card)
-        lay.addStretch()
+        # Widok konwersacji
+        self._sesje_view = QTextEdit()
+        self._sesje_view.setReadOnly(True)
+        self._sesje_view.setFont(_FONT_MONO)
+        self._sesje_view.setStyleSheet(
+            "QTextEdit{"
+            "background:#0d0d0d;color:#cccccc;"
+            "border:none;padding:8px;"
+            "}"
+        )
+        lay.addWidget(self._sesje_view, stretch=1)
+
+        # Stopka ze statystykami
+        footer = QFrame()
+        footer.setStyleSheet("QFrame{background:#1a1a1a;border-top:1px solid #2a2a2a;}")
+        footer_lay = QHBoxLayout(footer)
+        footer_lay.setContentsMargins(8, 3, 8, 3)
+        self._lbl_cc_sessions = QLabel("", styleSheet=_LBL_DIM)
+        self._lbl_cc_last = QLabel("", styleSheet=_LBL_DIM)
+        footer_lay.addWidget(self._lbl_cc_sessions)
+        footer_lay.addWidget(QLabel("·", styleSheet=_LBL_DIM))
+        footer_lay.addWidget(self._lbl_cc_last)
+        footer_lay.addStretch()
+        lay.addWidget(footer)
+
         return w
+
+    def _reload_sesje_view(self) -> None:
+        """Wczytuje i renderuje konwersację z najnowszego transkryptu projektu."""
+        project_path = self._path_edit.toPlainText().strip()
+        if not project_path:
+            self._sesje_view.setHtml(
+                "<p style='color:#5c6370;margin:16px;'>Brak ścieżki projektu.</p>"
+            )
+            self._lbl_sesje_path.setText("")
+            return
+
+        transcript_path = find_latest_transcript(project_path)
+        if transcript_path is None:
+            self._sesje_view.setHtml(
+                "<p style='color:#5c6370;margin:16px;'>"
+                "Brak transkryptów w ~/.claude/projects/ dla tego projektu.</p>"
+            )
+            self._lbl_sesje_path.setText("(brak transkryptów)")
+            return
+
+        self._lbl_sesje_path.setText(str(transcript_path))
+        messages = read_transcript_messages(transcript_path)
+
+        if not messages:
+            self._sesje_view.setHtml(
+                "<p style='color:#5c6370;margin:16px;'>Brak wiadomości w transkrypcie.</p>"
+            )
+            return
+
+        self._sesje_view.setHtml(_render_conversation_html(messages))
 
     # ---- Vibe Code ----------------------------------------------------- #
 
@@ -993,6 +1928,12 @@ class ProjectSlotWidget(QWidget):
         outer.addWidget(splitter)
         return w
 
+    # ---- Full Converter ------------------------------------------------ #
+
+    def _build_full_converter(self) -> QWidget:
+        self._full_converter = _FullConverterPanel()
+        return self._full_converter
+
     # ---- Pasek akcji --------------------------------------------------- #
 
     def _build_action_bar(self) -> QWidget:
@@ -1039,7 +1980,7 @@ class ProjectSlotWidget(QWidget):
     # Sygnały                                                               #
     # ------------------------------------------------------------------ #
 
-    _TAB_ZADANIOWIEC = 2  # indeks zakładki ZADANIOWIEC w self._tabs
+    _TAB_ZADANIOWIEC = 3  # indeks zakładki ZADANIOWIEC w self._tabs
 
     def _connect_signals(self) -> None:
         self._btn_launch.clicked.connect(lambda: self.launch_requested.emit(self._slot_id))
@@ -1052,7 +1993,7 @@ class ProjectSlotWidget(QWidget):
         self._btn_plan_save.clicked.connect(self._on_plan_save)
         self._btn_hist_refresh.clicked.connect(self._refresh_transcript)
         self._btn_stats_refresh.clicked.connect(self.reload_stats)
-        self._btn_sesje_refresh.clicked.connect(self.reload_history)
+        self._btn_sesje_refresh.clicked.connect(self._reload_sesje_view)
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
         for sig in (
@@ -1240,6 +2181,7 @@ class ProjectSlotWidget(QWidget):
             self.reload_stats()
             self.reload_history()
             self.reload_md_files()
+            self.reload_logi()
 
     def _on_config_changed(self) -> None:
         self._save_timer.start(800)
@@ -1338,16 +2280,15 @@ class ProjectSlotWidget(QWidget):
         h = self._history
         if not h:
             return
-        # Regularne sesje CC
-        self._lbl_cc_sessions.setText(
-            f"{h.transcript_count} sesji" if h.transcript_count else "0"
-        )
+        count_txt = f"{h.transcript_count} sesji CC" if h.transcript_count else "0 sesji CC"
+        self._lbl_cc_sessions.setText(count_txt)
         if h.transcript_last_at:
             self._lbl_cc_last.setText(
-                h.transcript_last_at.strftime("%Y-%m-%d %H:%M")
+                "ostatnia: " + h.transcript_last_at.strftime("%Y-%m-%d %H:%M")
             )
         else:
-            self._lbl_cc_last.setText("—")
+            self._lbl_cc_last.setText("")
+        self._reload_sesje_view()
 
 
     def stop_with_round_end(self) -> None:
@@ -1375,11 +2316,13 @@ class ProjectSlotWidget(QWidget):
         self._btn_push.setEnabled(False)
         self._workflow.run_git_push(path)
 
-    def _show_git_init_dialog(self, path: str) -> None:
+    def _show_git_init_dialog(self, path: str, then_round_end: bool = False) -> None:
         dlg = GitInitDialog(path, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._btn_push.setEnabled(False)
+        self._btn_round.setEnabled(False)
+        self._git_init_then_round_end = then_round_end
         self._workflow.run_git_init(
             project_path=path,
             remote_url=dlg.remote_url,
@@ -1390,6 +2333,20 @@ class ProjectSlotWidget(QWidget):
     def _on_round_end(self) -> None:
         path = self._path_edit.toPlainText().strip()
         if not path:
+            return
+        if not Path(path).is_dir():
+            QMessageBox.warning(self, "Zakoncz runde", f"Katalog projektu nie istnieje:\n{path}")
+            return
+        if not (Path(path) / ".git").exists():
+            reply = QMessageBox.question(
+                self,
+                "Brak repozytorium Git",
+                "Projekt nie ma repozytorium git.\n\n"
+                "Chcesz najpierw zainicjalizować repozytorium, a następnie zakończyć rundę?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._show_git_init_dialog(path, then_round_end=True)
             return
         reply = QMessageBox.question(
             self,
@@ -1410,6 +2367,15 @@ class ProjectSlotWidget(QWidget):
             self.reload_pcc()
         if name == "git_init" and ok:
             self.reload_stats()
+            if self._git_init_then_round_end:
+                self._git_init_then_round_end = False
+                path = self._path_edit.toPlainText().strip()
+                if path:
+                    self._btn_round.setEnabled(False)
+                    self._workflow.run_round_end(path)
+                return
+        if name == "git_init":
+            self._git_init_then_round_end = False
 
         if name == "round_end" and self._stop_pending:
             self._stop_pending = False
@@ -1432,7 +2398,10 @@ class ProjectSlotWidget(QWidget):
         if ok:
             QMessageBox.information(self, title, msg or "OK")
         else:
-            QMessageBox.critical(self, title, msg or "Blad operacji")
+            full_msg = msg or "Blad operacji"
+            if name == "round_end":
+                full_msg = "PLAN.md zostal wyczyszczony, ale push nie powiodl sie:\n\n" + full_msg
+            QMessageBox.critical(self, title, full_msg)
 
     def _refresh_transcript(self) -> None:
         # Znajdź snapshot przez rodzica
@@ -1456,6 +2425,610 @@ class ProjectSlotWidget(QWidget):
             text = e["text"].replace("\n", " ").strip()
             lines.append(f"[{role}] {text[:220]}")
         self._transcript.setPlainText("\n\n".join(lines))
+
+
+# ── Full Converter ────────────────────────────────────────────────────────────
+
+class _FullConverterPanel(QWidget):
+    """Panel pełnej konwersji projektu do formatu DPS.
+
+    Przepływ:
+      1. Wybór folderu projektu
+      2. Analiza — wykrycie plików .md i ocena stopnia zgodności z DPS
+      3. Rename — zmiana nazw plików do kanonicznych nazw DPS
+      4. Konwersja — sekwencyjna konwersja każdego pliku przez cc CLI
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project_path: Path | None = None
+        self._queue: list[str] = []       # pliki do przetworzenia (generowanie + konwersja)
+        self._gen_queue: list[str] = []   # pliki do wygenerowania od zera
+        self._current_file: str = ""
+        self._current_mode: str = ""      # "generate" | "convert"
+        self._conv_process: QProcess | None = None
+        self._conv_buffer: str = ""
+        self._missing_files: list[str] = []
+        self._setup_ui()
+
+    # ------------------------------------------------------------------ #
+    # UI                                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _setup_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        # Nagłówek
+        hdr = QHBoxLayout()
+        title = QLabel("Full Converter — konwersja projektu do formatu DPS")
+        title.setStyleSheet("color:#cccccc;font-size:13px;font-weight:bold;")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        self._global_badge = QLabel("")
+        self._global_badge.setVisible(False)
+        hdr.addWidget(self._global_badge)
+        root.addLayout(hdr)
+
+        desc = QLabel(
+            "Analizuje wybrany folder projektu, zmienia nazwy plików .md do standardu DPS "
+            "(CLAUDE.md, ARCHITECTURE.md, CONVENTIONS.md), generuje brakujące pliki przez AI "
+            "i konwertuje każdy z nich do formatu z oznaczonymi sekcjami <!-- SECTION:x -->.\n"
+            "Oryginały są zachowywane w podfolderze _no_dps/ jako <nazwa>__<projekt>.md."
+        )
+        desc.setStyleSheet("color:#6b7280;font-size:10px;")
+        desc.setWordWrap(True)
+        root.addWidget(desc)
+
+        root.addWidget(_sep())
+
+        # Wybór folderu
+        folder_row = QHBoxLayout()
+        self._path_lbl = QLabel("(nie wybrano folderu)")
+        self._path_lbl.setFont(_FONT_MONO)
+        self._path_lbl.setStyleSheet(_LBL_DIM)
+        self._path_lbl.setWordWrap(True)
+        folder_row.addWidget(self._path_lbl, stretch=1)
+        btn_pick = QPushButton("Wybierz folder…")
+        btn_pick.setStyleSheet(_BTN)
+        btn_pick.clicked.connect(self._on_pick_folder)
+        folder_row.addWidget(btn_pick)
+        btn_analyze = QPushButton("Analizuj")
+        btn_analyze.setStyleSheet(_BTN_ACCENT)
+        btn_analyze.clicked.connect(self._on_analyze)
+        self._btn_analyze = btn_analyze
+        folder_row.addWidget(btn_analyze)
+        root.addLayout(folder_row)
+
+        # Splitter: analiza (góra) | log konwersji (dół)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # Panel analizy
+        analysis_frame = QFrame()
+        analysis_frame.setStyleSheet(_CARD)
+        af_lay = QVBoxLayout(analysis_frame)
+        af_lay.setContentsMargins(8, 6, 8, 8)
+        af_lay.setSpacing(4)
+        af_lay.addWidget(QLabel("Analiza dokumentacji projektu", styleSheet=_LBL_HEAD))
+
+        self._analysis_view = QPlainTextEdit()
+        self._analysis_view.setReadOnly(True)
+        self._analysis_view.setFont(_FONT_MONO)
+        self._analysis_view.setStyleSheet(
+            "QPlainTextEdit{background:#0d1117;color:#cccccc;"
+            "border:1px solid #3c3c3c;border-radius:3px;padding:6px;}"
+        )
+        self._analysis_view.setPlaceholderText(
+            "Kliknij 'Analizuj' aby zobaczyć stan dokumentacji projektu…"
+        )
+        af_lay.addWidget(self._analysis_view)
+
+        # Pasek akcji rename + generuj
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(6)
+
+        self._btn_rename = QPushButton("1. Zmień nazwy do DPS")
+        self._btn_rename.setStyleSheet(
+            "QPushButton{background:#2a2a1a;color:#e5c07b;"
+            "border:1px solid #5a5a20;border-radius:3px;padding:5px 12px;font-weight:bold}"
+            "QPushButton:hover{background:#4a4a20}"
+            "QPushButton:disabled{color:#5c5c5c;border-color:#383838}"
+        )
+        self._btn_rename.setEnabled(False)
+        self._btn_rename.clicked.connect(self._on_rename)
+        actions_row.addWidget(self._btn_rename)
+
+        self._btn_generate = QPushButton("1b. Generuj brakujące przez AI")
+        self._btn_generate.setStyleSheet(
+            "QPushButton{background:#1a2a3a;color:#61afef;"
+            "border:1px solid #2a4a6a;border-radius:3px;padding:5px 12px;font-weight:bold}"
+            "QPushButton:hover{background:#2a4a6a}"
+            "QPushButton:disabled{color:#5c5c5c;border-color:#383838}"
+        )
+        self._btn_generate.setEnabled(False)
+        self._btn_generate.clicked.connect(self._on_generate_missing)
+        actions_row.addWidget(self._btn_generate)
+
+        actions_row.addStretch()
+        self._rename_status = QLabel("", styleSheet=_LBL_DIM)
+        actions_row.addWidget(self._rename_status)
+        af_lay.addLayout(actions_row)
+
+        splitter.addWidget(analysis_frame)
+
+        # Panel logu konwersji
+        log_frame = QFrame()
+        log_frame.setStyleSheet(_CARD)
+        lf_lay = QVBoxLayout(log_frame)
+        lf_lay.setContentsMargins(8, 6, 8, 8)
+        lf_lay.setSpacing(4)
+
+        log_hdr = QHBoxLayout()
+        log_hdr.addWidget(QLabel("Log operacji AI", styleSheet=_LBL_HEAD))
+        log_hdr.addStretch()
+        self._progress_lbl = QLabel("", styleSheet=_LBL_DIM)
+        self._progress_lbl.setFont(_FONT_SMALL)
+        log_hdr.addWidget(self._progress_lbl)
+        lf_lay.addLayout(log_hdr)
+
+        self._log_view = QPlainTextEdit()
+        self._log_view.setReadOnly(True)
+        self._log_view.setFont(_FONT_MONO)
+        self._log_view.setStyleSheet(
+            "QPlainTextEdit{background:#0d1117;color:#98c379;"
+            "border:1px solid #2a3a2a;border-radius:3px;padding:6px;}"
+        )
+        self._log_view.setPlaceholderText("Tu pojawi się streaming odpowiedzi AI…")
+        lf_lay.addWidget(self._log_view)
+
+        # Przyciski konwersji
+        conv_row = QHBoxLayout()
+        self._btn_convert = QPushButton("2. Konwertuj wszystkie pliki przez AI")
+        self._btn_convert.setStyleSheet(
+            "QPushButton{background:#2a1a3a;color:#c678dd;"
+            "border:1px solid #4a2a5a;border-radius:3px;padding:5px 14px;font-weight:bold}"
+            "QPushButton:hover{background:#4a2a5a}"
+            "QPushButton:disabled{color:#5c5c5c;border-color:#383838}"
+        )
+        self._btn_convert.setEnabled(False)
+        self._btn_convert.clicked.connect(self._on_convert_all)
+        conv_row.addWidget(self._btn_convert)
+
+        self._btn_stop = QPushButton("■  Stop")
+        self._btn_stop.setStyleSheet(
+            "QPushButton{background:#3a2a00;color:#e5c07b;"
+            "border:1px solid #5a4000;border-radius:3px;padding:5px 12px}"
+            "QPushButton:hover{background:#5a4000}"
+        )
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.clicked.connect(self._on_stop)
+        conv_row.addWidget(self._btn_stop)
+
+        conv_row.addStretch()
+        self._conv_status = QLabel("", styleSheet=_LBL_DIM)
+        self._conv_status.setFont(_FONT_SMALL)
+        conv_row.addWidget(self._conv_status)
+        lf_lay.addLayout(conv_row)
+
+        splitter.addWidget(log_frame)
+        splitter.setSizes([280, 340])
+        root.addWidget(splitter, stretch=1)
+
+    # ------------------------------------------------------------------ #
+    # Logika                                                               #
+    # ------------------------------------------------------------------ #
+
+    def _on_pick_folder(self) -> None:
+        start = str(self._project_path) if self._project_path else str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "Wybierz folder projektu", start)
+        if not folder:
+            return
+        self._project_path = Path(folder)
+        self._path_lbl.setText(folder)
+        self._path_lbl.setStyleSheet(_LBL_VAL)
+        self._btn_analyze.setEnabled(True)
+        self._btn_rename.setEnabled(False)
+        self._btn_generate.setEnabled(False)
+        self._btn_convert.setEnabled(False)
+        self._analysis_view.clear()
+        self._log_view.clear()
+        self._global_badge.setVisible(False)
+        self._rename_status.setText("")
+        self._conv_status.setText("")
+        self._progress_lbl.setText("")
+        self._missing_files = []
+
+    def _on_analyze(self) -> None:
+        if not self._project_path:
+            return
+        lines, rename_needed, convert_ready, missing = _analyze_project(self._project_path)
+        self._missing_files = missing
+        self._analysis_view.setPlainText("\n".join(lines))
+        self._btn_rename.setEnabled(rename_needed)
+        self._btn_generate.setEnabled(bool(missing) and not rename_needed)
+        self._btn_convert.setEnabled(convert_ready and not rename_needed)
+
+    def _on_rename(self) -> None:
+        if not self._project_path:
+            return
+        renamed, errors = _rename_to_dps(self._project_path)
+        msgs = []
+        for old, new in renamed:
+            msgs.append(f"  ✓  {old}  →  {new}")
+        for err in errors:
+            msgs.append(f"  ✗  {err}")
+        if msgs:
+            existing = self._analysis_view.toPlainText()
+            self._analysis_view.setPlainText(
+                existing + "\n\n── Rename ──\n" + "\n".join(msgs)
+            )
+        self._rename_status.setText(f"Zmieniono {len(renamed)} plików")
+        self._btn_rename.setEnabled(False)
+        self._btn_generate.setEnabled(bool(self._missing_files))
+        self._btn_convert.setEnabled(True)
+
+    def _on_generate_missing(self) -> None:
+        if not self._project_path or not self._missing_files:
+            return
+        cc = shutil.which("cc") or shutil.which("claude")
+        if not cc:
+            QMessageBox.warning(self, "Brak cc",
+                                "Nie znaleziono polecenia 'cc' ani 'claude' w PATH.")
+            return
+        self._gen_queue = list(self._missing_files)
+        self._queue = []
+        self._log_view.clear()
+        self._btn_generate.setEnabled(False)
+        self._btn_rename.setEnabled(False)
+        self._btn_convert.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._global_badge.setVisible(False)
+        self._log("── Generowanie brakujących plików ──")
+        self._run_next_gen()
+
+    def _on_convert_all(self) -> None:
+        if not self._project_path:
+            return
+        cc = shutil.which("cc") or shutil.which("claude")
+        if not cc:
+            QMessageBox.warning(self, "Brak cc",
+                                "Nie znaleziono polecenia 'cc' ani 'claude' w PATH.")
+            return
+        self._queue = []
+        for fname in sorted(_DPS_CONVERTIBLE):
+            p = self._project_path / fname
+            if p.exists():
+                content = p.read_text(encoding="utf-8", errors="replace")
+                if "<!-- SECTION:" not in content:
+                    self._queue.append(fname)
+        if not self._queue:
+            self._conv_status.setText("Brak plików do konwersji (wszystkie już DPS?)")
+            return
+        self._log_view.clear()
+        self._btn_convert.setEnabled(False)
+        self._btn_rename.setEnabled(False)
+        self._btn_generate.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._global_badge.setVisible(False)
+        self._log("── Rozpoczynam konwersję ──")
+        self._current_mode = "convert"
+        self._conv_next()
+
+    # ---- Generowanie od zera ----------------------------------------- #
+
+    def _run_next_gen(self) -> None:
+        if not self._gen_queue:
+            self._log("\n── Generowanie zakończone ──")
+            self._btn_stop.setEnabled(False)
+            self._btn_generate.setEnabled(False)
+            self._btn_convert.setEnabled(True)
+            self._progress_lbl.setText("")
+            self._conv_status.setText("Wygenerowano — kliknij 'Konwertuj' aby dodać sekcje")
+            return
+
+        self._current_file = self._gen_queue.pop(0)
+        done = len(self._missing_files) - len(self._gen_queue)
+        self._progress_lbl.setText(
+            f"Generuję {self._current_file}  ({done}/{len(self._missing_files)})"
+        )
+        self._conv_status.setText(f"Generuję {self._current_file}…")
+        self._log(f"\n── Generuję {self._current_file} ──")
+
+        context = _build_project_context(self._project_path, exclude=self._current_file)
+        prompt = _DPS_GEN_PROMPT.get(
+            self._current_file, _DPS_GEN_PROMPT["CLAUDE.md"]
+        ).format(context=context)
+
+        self._conv_buffer = ""
+        self._current_mode = "generate"
+        cc = shutil.which("cc") or shutil.which("claude")
+        self._conv_process = QProcess(self)
+        self._conv_process.readyReadStandardOutput.connect(self._on_stdout)
+        self._conv_process.readyReadStandardError.connect(self._on_stderr)
+        self._conv_process.finished.connect(self._on_file_finished)
+        if not _start_cc_with_prompt(self._conv_process, cc, prompt):
+            self._log(f"  [BŁĄD] start procesu dla {self._current_file}")
+            self._run_next_gen()
+
+    # ---- Wspólna kolejka konwersji ------------------------------------ #
+
+    def _conv_next(self) -> None:
+        if not self._queue:
+            self._log("\n── Konwersja zakończona ──")
+            self._btn_stop.setEnabled(False)
+            self._btn_convert.setEnabled(False)
+            self._progress_lbl.setText("")
+            self._global_badge.setText("DPS ✓")
+            self._global_badge.setStyleSheet(
+                "background:#1a3a1a;color:#98c379;border-radius:3px;"
+                "padding:2px 10px;font-size:10px;font-weight:bold;"
+            )
+            self._global_badge.setVisible(True)
+            return
+
+        self._current_file = self._queue.pop(0)
+        done = len(list(_DPS_CONVERTIBLE)) - len(self._queue)
+        self._progress_lbl.setText(f"{self._current_file}  ({done}/{len(_DPS_CONVERTIBLE)})")
+        self._conv_status.setText(f"Konwertuję {self._current_file}…")
+        self._log(f"\n── {self._current_file} ──")
+
+        md_path = self._project_path / self._current_file
+        content = md_path.read_text(encoding="utf-8", errors="replace")
+        prompt = _DPS_CONV_PROMPT.get(
+            self._current_file, _DPS_CONV_PROMPT["CLAUDE.md"]
+        ).format(content=content)
+
+        self._conv_buffer = ""
+        self._current_mode = "convert"
+        cc = shutil.which("cc") or shutil.which("claude")
+        self._conv_process = QProcess(self)
+        self._conv_process.readyReadStandardOutput.connect(self._on_stdout)
+        self._conv_process.readyReadStandardError.connect(self._on_stderr)
+        self._conv_process.finished.connect(self._on_file_finished)
+        if not _start_cc_with_prompt(self._conv_process, cc, prompt):
+            self._log(f"  [BŁĄD] start procesu dla {self._current_file}")
+            self._conv_next()
+
+    def _on_stdout(self) -> None:
+        if not self._conv_process:
+            return
+        raw = bytes(self._conv_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                chunk = ""
+                if obj.get("type") == "content_block_delta":
+                    chunk = obj.get("delta", {}).get("text", "")
+                elif obj.get("type") == "text":
+                    chunk = obj.get("text", "")
+                elif obj.get("type") == "result":
+                    chunk = obj.get("result", "")
+                if chunk:
+                    self._conv_buffer += chunk
+                    self._log_chunk(chunk)
+            except (json.JSONDecodeError, KeyError):
+                self._conv_buffer += line + "\n"
+                self._log_chunk(line + "\n")
+
+    def _on_stderr(self) -> None:
+        if not self._conv_process:
+            return
+        raw = bytes(self._conv_process.readAllStandardError()).decode("utf-8", errors="replace")
+        if raw.strip():
+            self._log(f"  [STDERR] {raw.strip()}")
+
+    def _on_file_finished(self, exit_code: int, _exit_status) -> None:
+        new_content = self._conv_buffer.strip()
+        if exit_code == 0 and new_content:
+            if self._current_mode == "generate":
+                # Nowy plik — zapisujemy bezpośrednio (brak oryginału do backupu)
+                try:
+                    (self._project_path / self._current_file).write_text(
+                        new_content, encoding="utf-8"
+                    )
+                    self._log(f"  ✓ Wygenerowano {self._current_file}")
+                except OSError as e:
+                    self._log(f"  ✗ Zapis {self._current_file}: {e}")
+            else:
+                backup = self._save_converted(self._current_file, new_content)
+                backup_info = f"_no_dps/{backup.name}" if backup else "brak oryginału"
+                self._log(f"  ✓ Zapisano {self._current_file} (oryginał → {backup_info})")
+        else:
+            self._log(f"  ✗ {self._current_file} — błąd (kod {exit_code})")
+
+        if self._current_mode == "generate":
+            self._run_next_gen()
+        else:
+            self._conv_next()
+
+    def _on_stop(self) -> None:
+        if self._conv_process and self._conv_process.state() != QProcess.ProcessState.NotRunning:
+            self._conv_process.kill()
+        self._queue.clear()
+        self._gen_queue.clear()
+        self._btn_stop.setEnabled(False)
+        self._btn_convert.setEnabled(True)
+        self._btn_generate.setEnabled(bool(self._missing_files))
+        self._conv_status.setText("Przerwano")
+        self._progress_lbl.setText("")
+
+    def _save_converted(self, filename: str, content: str) -> Path | None:
+        """Zapisuje skonwertowany plik, oryginał przenosi do _no_dps/. Zwraca ścieżkę backupu."""
+        md_path = self._project_path / filename
+        backup_path = _backup_original(md_path) if md_path.exists() else None
+        md_path.write_text(content, encoding="utf-8")
+        return backup_path
+
+    def _log(self, text: str) -> None:
+        self._log_view.moveCursor(QTextCursor.MoveOperation.End)
+        self._log_view.insertPlainText(text + "\n")
+
+    def _log_chunk(self, chunk: str) -> None:
+        self._log_view.moveCursor(QTextCursor.MoveOperation.End)
+        self._log_view.insertPlainText(chunk)
+
+
+# ── Funkcje pomocnicze analizy i rename ──────────────────────────────────────
+
+def _analyze_project(project_path: Path) -> tuple[list[str], bool, bool, list[str]]:
+    """Zwraca (linie raportu, czy_potrzebny_rename, czy_można_konwertować, brakujące_pliki)."""
+    lines: list[str] = []
+    lines.append(f"Projekt: {project_path}")
+    lines.append(f"Data:    {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append("")
+
+    md_files = sorted(project_path.glob("*.md")) + sorted(project_path.glob("*.MD"))
+    if not md_files:
+        lines.append("⚠  Brak plików .md w katalogu projektu.")
+        return lines, False, False, []
+
+    lines.append(f"Znalezione pliki .md ({len(md_files)}):")
+    lines.append("")
+
+    rename_needed = False
+    convertible_found = False
+
+    for f in md_files:
+        canon = _DPS_CANON.get(f.name.lower())
+        is_readonly = canon in _DPS_READONLY
+
+        content = ""
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+
+        size_kb = len(content.encode()) / 1024
+        status_parts = []
+
+        # Zgodność nazwy
+        if canon is None:
+            status_parts.append("❓ Nieznana nazwa")
+        elif f.name != canon:
+            status_parts.append(f"⚠  Nazwa → {canon}")
+            if not is_readonly:
+                rename_needed = True
+        else:
+            status_parts.append("✓ Nazwa OK")
+
+        # Zgodność formatu / tryb
+        if is_readonly:
+            status_parts.append("— pomijany (tylko odczyt)")
+        else:
+            is_dps = "<!-- SECTION:" in content
+            section_count = content.count("<!-- SECTION:")
+            has_headings = bool(re.search(r"^#{2,3}\s", content, re.MULTILINE))
+            if is_dps:
+                status_parts.append(f"✓ DPS ({section_count} sekcji)")
+            elif has_headings:
+                status_parts.append("○ Zwykły MD (wymaga konwersji)")
+                if canon in _DPS_CONVERTIBLE:
+                    convertible_found = True
+            else:
+                status_parts.append("○ Brak sekcji")
+
+        lines.append(f"  {f.name:<30}  {size_kb:5.1f} KB   {' | '.join(status_parts)}")
+
+    lines.append("")
+
+    # Podsumowanie — brakujące pliki konwertowalnych (bez README/ROADMAP/PLAN)
+    canon_names = set(_DPS_CONVERTIBLE)
+    existing_names = {f.name for f in md_files} | {
+        _DPS_CANON.get(f.name.lower(), "") for f in md_files
+    }
+    missing_list = sorted(canon_names - existing_names)
+    if missing_list:
+        lines.append(f"⚠  Brakuje plików: {', '.join(missing_list)}  (można wygenerować przez AI)")
+
+    if rename_needed:
+        lines.append("→ Krok 1: Zmień nazwy plików do standardu DPS")
+    if missing_list:
+        lines.append("→ Krok 1b: Wygeneruj brakujące pliki przez AI")
+    if convertible_found:
+        lines.append("→ Krok 2: Konwertuj pliki do formatu DPS przez AI")
+    if not rename_needed and not convertible_found and not missing_list:
+        lines.append("✓ Projekt jest już w pełni zgodny z formatem DPS")
+
+    return lines, rename_needed, convertible_found, missing_list
+
+
+def _rename_to_dps(project_path: Path) -> tuple[list[tuple[str, str]], list[str]]:
+    """Zmienia nazwy plików .md do kanonicznych nazw DPS.
+
+    Zwraca (lista (stara, nowa), błędy).
+    """
+    renamed: list[tuple[str, str]] = []
+    errors: list[str] = []
+    md_files = list(project_path.glob("*.md")) + list(project_path.glob("*.MD"))
+    for f in md_files:
+        canon = _DPS_CANON.get(f.name.lower())
+        if canon and f.name != canon and canon not in _DPS_READONLY:
+            target = project_path / canon
+            if target.exists():
+                errors.append(f"{f.name} → {canon} (cel już istnieje, pominięto)")
+                continue
+            try:
+                f.rename(target)
+                renamed.append((f.name, canon))
+            except OSError as e:
+                errors.append(f"{f.name} → {canon}: {e}")
+    return renamed, errors
+
+
+def _start_cc_with_prompt(proc: "QProcess", cc: str, prompt: str) -> bool:
+    """Uruchamia cc CLI z promptem przez stdin zamiast argumentu.
+
+    Zwraca True jeśli proces wystartował. Używa stdin żeby ominąć limit
+    długości argumentu wiersza poleceń Windows i poprawnie przekazać prompt.
+    """
+    proc.setProgram(cc)
+    proc.setArguments(["--print", "--output-format", "stream-json"])
+    proc.start()
+    if not proc.waitForStarted(3000):
+        return False
+    proc.write(prompt.encode("utf-8"))
+    proc.closeWriteChannel()
+    return True
+
+
+def _backup_original(md_path: Path) -> Path:
+    """Kopiuje oryginał do _no_dps/<nazwa>__<projekt>.md przed nadpisaniem.
+
+    Zwraca ścieżkę do pliku backupu.
+    """
+    project_name = md_path.parent.name
+    stem = md_path.stem
+    backup_dir = md_path.parent / "_no_dps"
+    backup_dir.mkdir(exist_ok=True)
+    backup_path = backup_dir / f"{stem}__{project_name}.md"
+    shutil.copy2(str(md_path), str(backup_path))
+    return backup_path
+
+
+def _build_project_context(project_path: Path, exclude: str = "") -> str:
+    """Zbiera treść istniejących plików MD projektu jako kontekst dla AI.
+
+    Pomija plik `exclude` (ten który generujemy) i pliki readonly.
+    Przycina każdy plik do 3000 znaków żeby nie przekroczyć limitu promptu.
+    """
+    parts: list[str] = []
+    for fname in (*_DPS_CONVERTIBLE, "PLAN.md"):
+        if fname == exclude:
+            continue
+        p = project_path / fname
+        if not p.exists():
+            continue
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        snippet = content[:3000] + ("…(skrócono)" if len(content) > 3000 else "")
+        parts.append(f"=== {fname} ===\n{snippet}")
+    return "\n\n".join(parts) if parts else "(brak innych plików MD w projekcie)"
 
 
 class _TerminalCountSelector(QWidget):
@@ -1511,18 +3084,30 @@ class _TerminalCountSelector(QWidget):
             self.valueChanged.emit(n)
 
 
-class _ColoredSlotTabBar(QTabBar):
-    """QTabBar z kolorowym tłem per indeks i dwuwierszową etykietą (Projekt N + folder).
+# Kolory statusów sesji CC w tab barze
+_STATUS_COLOR_WORKING = QColor("#4ade80")   # zielony — CC pracuje
+_STATUS_COLOR_WAITING = QColor("#fbbf24")   # żółty  — waiting/pauza
+_STATUS_COLOR_OFFLINE = QColor("#f87171")   # czerwony — brak sesji
 
-    Qt nie pozwala stylować pojedynczych zakładek przez QSS, więc rysujemy własnym
-    paintEvent. Każda zakładka dostaje barwę z `colors[i]`: pełną dla aktywnej,
-    półprzezroczystą dla hovera, mocno przyciemnioną dla nieaktywnej.
+
+class _ColoredSlotTabBar(QTabBar):
+    """QTabBar z kolorowym tłem per indeks i trzywierszową etykietą:
+    wiersz 1: Projekt N
+    wiersz 2: nazwa folderu
+    wiersz 3: ikona + status + czas  (kolor zależny od fazy sesji)
     """
 
     def __init__(self, colors: list[str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._colors = [QColor(c) for c in colors]
         self._sub_labels: list[str] = ["", "", "", ""]
+        # (tekst_statusu, kolor_statusu) per slot
+        self._status_labels: list[tuple[str, QColor]] = [
+            ("", _STATUS_COLOR_OFFLINE),
+            ("", _STATUS_COLOR_OFFLINE),
+            ("", _STATUS_COLOR_OFFLINE),
+            ("", _STATUS_COLOR_OFFLINE),
+        ]
         self._hover_index = -1
         self.setMouseTracking(True)
         self.setExpanding(False)
@@ -1533,8 +3118,27 @@ class _ColoredSlotTabBar(QTabBar):
             self._sub_labels[index] = text or ""
             self.update()
 
+    def setStatusLabel(self, index: int, phase: str | None, elapsed: str, is_missing: bool) -> None:
+        """Ustaw wiersz statusu dla danego slotu."""
+        if not (0 <= index < len(self._status_labels)):
+            return
+        if is_missing or not phase:
+            text = "○  brak sesji"
+            color = _STATUS_COLOR_OFFLINE
+        elif phase == "working":
+            text = f"⚙  working  {elapsed}"
+            color = _STATUS_COLOR_WORKING
+        elif phase == "waiting":
+            text = f"⏸  waiting  {elapsed}"
+            color = _STATUS_COLOR_WAITING
+        else:
+            text = f"●  {phase}  {elapsed}"
+            color = _STATUS_COLOR_WAITING
+        self._status_labels[index] = (text, color)
+        self.update()
+
     def tabSizeHint(self, index: int) -> QSize:  # type: ignore[override]
-        return QSize(200, 56)
+        return QSize(200, 72)
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         super().mouseMoveEvent(event)
@@ -1556,12 +3160,14 @@ class _ColoredSlotTabBar(QTabBar):
     def paintEvent(self, event) -> None:  # type: ignore[override]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        h3 = None  # wysokość jednej trzeciej, ustalana per zakładka
         for i in range(self.count()):
             color = self._colors[i] if i < len(self._colors) else QColor("#888888")
             rect = self.tabRect(i)
             is_selected = (i == self.currentIndex())
             is_hover = (i == self._hover_index)
 
+            # Tło zakładki
             bg = QColor(color)
             if is_selected:
                 pass
@@ -1577,31 +3183,101 @@ class _ColoredSlotTabBar(QTabBar):
 
             main_text = self.tabText(i) or ""
             sub_text = self._sub_labels[i] if i < len(self._sub_labels) else ""
+            status_text, status_color = (
+                self._status_labels[i] if i < len(self._status_labels)
+                else ("", _STATUS_COLOR_OFFLINE)
+            )
 
+            h = rect.height()
+            row_h = h // 3
+
+            # Wiersz 1: nazwa projektu (Projekt N)
+            r1 = QRect(rect.x() + 4, rect.y() + 2, rect.width() - 8, row_h)
+            font_main = QFont("Segoe UI", 11)
+            font_main.setBold(True)
+            painter.setFont(font_main)
+            painter.setPen(QColor("#000000") if is_selected else color.lighter(170))
+            painter.drawText(r1, Qt.AlignmentFlag.AlignCenter, main_text)
+
+            # Wiersz 2: nazwa folderu
+            r2 = QRect(rect.x() + 4, rect.y() + row_h + 1, rect.width() - 8, row_h)
+            font_sub = QFont("Segoe UI", 9)
+            painter.setFont(font_sub)
+            painter.setPen(QColor("#1a1a1a") if is_selected else color)
             if sub_text:
-                main_rect = QRect(rect.x() + 4, rect.y() + 4,
-                                  rect.width() - 8, rect.height() // 2 - 2)
-                sub_rect = QRect(rect.x() + 4, rect.y() + rect.height() // 2,
-                                 rect.width() - 8, rect.height() // 2 - 5)
-
-                font_main = QFont("Segoe UI", 11)
-                font_main.setBold(True)
-                painter.setFont(font_main)
-                painter.setPen(QColor("#000000") if is_selected else color.lighter(170))
-                painter.drawText(main_rect, Qt.AlignmentFlag.AlignCenter, main_text)
-
-                font_sub = QFont("Segoe UI", 9)
-                painter.setFont(font_sub)
-                painter.setPen(QColor("#1a1a1a") if is_selected else color)
                 metrics = painter.fontMetrics()
                 elided = metrics.elidedText(sub_text, Qt.TextElideMode.ElideMiddle, rect.width() - 12)
-                painter.drawText(sub_rect, Qt.AlignmentFlag.AlignCenter, elided)
-            else:
-                font_main = QFont("Segoe UI", 11)
-                font_main.setBold(True)
-                painter.setFont(font_main)
-                painter.setPen(QColor("#000000") if is_selected else color.lighter(170))
-                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, main_text)
+                painter.drawText(r2, Qt.AlignmentFlag.AlignCenter, elided)
+
+            # Wiersz 3: status sesji (ikona + faza + czas)
+            r3 = QRect(rect.x() + 4, rect.y() + row_h * 2 + 1, rect.width() - 8, row_h - 2)
+            # Pasek tła statusu
+            status_bg = QColor(status_color)
+            status_bg.setAlpha(50 if not is_selected else 80)
+            painter.fillRect(r3, status_bg)
+            font_st = QFont("Segoe UI", 8)
+            painter.setFont(font_st)
+            painter.setPen(QColor("#000000"))
+            if status_text:
+                metrics = painter.fontMetrics()
+                elided = metrics.elidedText(status_text, Qt.TextElideMode.ElideRight, rect.width() - 10)
+                painter.drawText(r3, Qt.AlignmentFlag.AlignCenter, elided)
+
+
+def _render_conversation_html(messages: list[dict]) -> str:
+    """Renderuje listę wiadomości {type, text, ts} jako HTML do QTextEdit."""
+    import html as _html
+
+    def _ts(msg: dict) -> str:
+        ts = msg.get("ts")
+        if ts is None:
+            return ""
+        try:
+            return ts.strftime("%H:%M")
+        except Exception:
+            return ""
+
+    parts = [
+        "<html><body style='background:#0d0d0d;margin:0;padding:0;"
+        "font-family:Consolas,monospace;font-size:13px;'>"
+    ]
+    for msg in messages:
+        role = msg.get("type", "")
+        text = _html.escape(msg.get("text", "").strip())
+        ts_str = _ts(msg)
+        text = text.replace("\n", "<br>")
+
+        if role == "user":
+            parts.append(
+                f"<div style='"
+                f"background:#0e1e2e;"
+                f"border-left:3px solid #569cd6;"
+                f"margin:6px 8px 2px 8px;"
+                f"padding:6px 10px;"
+                f"border-radius:0 4px 4px 0;'>"
+                f"<span style='color:#569cd6;font-size:10px;font-weight:bold;'>"
+                f"USER</span>"
+                f"{'&nbsp;&nbsp;<span style=\"color:#3c5a7a;font-size:10px;\">' + ts_str + '</span>' if ts_str else ''}"
+                f"<br><span style='color:#b0c8e0;'>{text}</span>"
+                f"</div>"
+            )
+        else:
+            parts.append(
+                f"<div style='"
+                f"background:#0d1a0d;"
+                f"border-left:3px solid #4ec94e;"
+                f"margin:2px 8px 6px 24px;"
+                f"padding:6px 10px;"
+                f"border-radius:0 4px 4px 0;'>"
+                f"<span style='color:#4ec94e;font-size:10px;font-weight:bold;'>"
+                f"CC</span>"
+                f"{'&nbsp;&nbsp;<span style=\"color:#2a5a2a;font-size:10px;\">' + ts_str + '</span>' if ts_str else ''}"
+                f"<br><span style='color:#c8e0c8;'>{text}</span>"
+                f"</div>"
+            )
+
+    parts.append("</body></html>")
+    return "".join(parts)
 
 
 class CCLauncherPanel(QWidget):
@@ -1675,6 +3351,17 @@ class CCLauncherPanel(QWidget):
 
     def _on_snapshot(self, snap: TerminalSnapshot) -> None:
         self._slots[snap.slot_id - 1].update_snapshot(snap)
+        # Aktualizuj wiersz statusu w tab barze
+        s = snap.seconds_since_change
+        mins = s // 60
+        secs = s % 60
+        elapsed = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+        self._slot_tab_bar.setStatusLabel(
+            index=snap.slot_id - 1,
+            phase=snap.phase,
+            elapsed=elapsed,
+            is_missing=snap.is_file_missing,
+        )
 
     def _on_config_changed(self) -> None:
         for i, slot in enumerate(self._slots):

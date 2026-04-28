@@ -1,0 +1,35 @@
+{
+  "project": {
+    "title": "SSS Module dla Claude Manager",
+    "type": "desktop",
+    "client": "własny",
+    "stack": "Python 3.13, PySide6, VS Code wtyczka VS_CLAUDE, Claude Code CLI",
+    "one_liner": "Podmoduł CM (Develop → Sesje CC → Logi): UI do startu projektu CC w plan mode, polling PLAN.md, logowanie wszystkich rund SSS."
+  },
+  "claude": {
+    "off_limits": "- nie modyfikuj plików projektu CC z poziomu CM (tylko read-only poza spawnem inicjalnym)\n- nie używaj plansDirectory innego niż '.' w settings.json projektu spawnowanego",
+    "specifics": "- workflow: user wpisuje prompt + nazwę + lokalizację w CM, klik wysyła prompt do CC w plan mode i otwiera VS Code z wtyczką VS_CLAUDE\n- baza: C:\\Users\\Sławek\\claude-env-manager, wtyczka: C:\\Users\\Sławek\\claude-env-manager\\VS_CLAUDE\n- aktualnie istnieje przycisk Start CC robiący przejście z Pythona do VS Code — przerabiamy ten flow na wysyłkę prompta + auto-otwarcie\n- logi pod menu CM: Develop → Sesje CC → Logi\n- jeden rekord = jedno zdarzenie (event-sourced log)\n- CHANGELOG.md projektu CC nie istnieje aż do pierwszej Rundy Serwisowej — wtedy tworzy go skill /sss; w logach CM pojawia się wpis o utworzeniu w sekcji SSS"
+  },
+  "architecture": {
+    "overview": "Moduł CM spawnuje projekt Claude Code w plan mode i monitoruje jego stan. UI (PySide6) pozwala wpisać prompt + nazwę + lokalizację. Po kliknięciu CM zapisuje strukturę projektu, wkleja prompt do CC i odpala VS Code z wtyczką VS_CLAUDE. W tle pollinguje PLAN.md co minutę, pozostałe pliki .md raz na rundę. Wszystkie zdarzenia (rundy, skrypty, bufor, zadania, milestone'y) lądują w log store dostępnym z menu Develop → Sesje CC → Logi.",
+    "components": "- IntakeView: PySide6 widget z polami prompt + nazwa + lokalizacja + przycisk Start\n- ProjectSpawner: tworzy katalog projektu, wkleja prompt do CC, odpala VS Code\n- PlanWatcher: QFileSystemWatcher + QTimer 60s, parsuje PLAN.md, emituje sygnały zmian\n- RoundWatcher: czyta CLAUDE/ARCHITECTURE/CONVENTIONS/CHANGELOG raz na rundę (trigger: zmiana fazy z state.py)\n- LogStore: SQLite + tabela events, kolumny session_id, timestamp, round, kind, payload\n- LogsView: PySide6 widget pod Develop → Sesje CC → Logi z filtrami session/round/kind\n- SSSBridge: wrapper na skill /sss, woła skrypty Pythona (init_project, plan_buffer, service_round, finalize, state)",
+    "data_flow": "user wpisuje prompt → IntakeView → ProjectSpawner (mkdir, prompt → schowek/stdin CC, VS Code subprocess) → PlanWatcher poll PLAN.md → state.py wykrywa fazę → LogStore zapis events → LogsView render",
+    "external_deps": "- PySide6: 6.7+\n- watchdog lub QFileSystemWatcher: monitoring plików\n- sqlite3: stdlib, log store\n- subprocess: stdlib, spawn VS Code i CC\n- claude CLI: 2.x z plan mode",
+    "decisions": "- [x] SQLite zamiast pliku JSONL na logi | 2026-04-28 | filtry po session/round/kind wymagają indeksów; jeden plik DB w katalogu CM\n- [x] PLAN.md polling co 60s zamiast tylko QFileSystemWatcher | 2026-04-28 | watcher nie łapie zmian zapisanych przez WSL/edytory zewnętrzne; timer 60s jest deterministyczny\n- [x] inne pliki .md tylko raz na rundę | 2026-04-28 | user wymaganie + redukcja I/O\n- [x] CHANGELOG.md powstaje dopiero przy pierwszym service round | 2026-04-28 | tak działa skill /sss — moduł nie tworzy go z góry\n- [x] event-sourced log (jeden rekord = jedno zdarzenie) | 2026-04-28 | umożliwia rekonstrukcję historii projektu i audyt rund",
+    "constraints": "- Windows-first (ścieżki C:\\Users\\Sławek), ale kod ma pathlib bez hardkodu\n- nie wstawiamy promptu przez clipboard jeśli da się przez stdin — clipboard jest ostateczny fallback\n- VS_CLAUDE wtyczka jest stałym artefaktem, CM tylko wskazuje na nią"
+  },
+  "conventions": {
+    "naming": "- snake_case dla plików i modułów\n- PascalCase dla klas Qt (View/Widget/Spawner/Watcher/Store)\n- prefix qt_ dla sygnałów własnych\n- session_id format: YYYYMMDD_HHMMSS_slug",
+    "file_layout": "- src/cm/sss_module/: cały moduł\n- src/cm/sss_module/views/: PySide6 widgets (intake_view.py, logs_view.py)\n- src/cm/sss_module/core/: logika (spawner.py, plan_watcher.py, round_watcher.py, log_store.py, sss_bridge.py)\n- src/cm/sss_module/db/: schema SQLite, migracje\n- tests/sss_module/: pytest",
+    "code_style": "- type hints wszędzie (3.13)\n- pathlib.Path zamiast os.path\n- Qt sygnały zamiast callbacków\n- żadnych prints — logging.getLogger(__name__)",
+    "commit_style": "- feat(sss): nowa funkcja\n- fix(sss): bug\n- refactor(sss): zmiana wewnętrzna\n- test(sss): testy",
+    "testing": "- pytest + pytest-qt do widgetów\n- tmp_path dla fake projektów\n- mock subprocess.Popen przy testach Spawnera\n- testy log_store na :memory: SQLite",
+    "anti_patterns": "- nigdy nie modyfikuj plików .md projektu CC z poziomu CM (read-only po spawnie)\n- nigdy nie blokuj UI thread czytaniem plików — używaj QThread/QTimer\n- nigdy nie hardkoduj ścieżek absolutnych w kodzie — tylko w configu\n- nigdy nie polluj logów print()-ami"
+  },
+  "plan": {
+    "goal": "MVP: spawner CC z plan mode + polling PLAN.md + LogsView pod Develop → Sesje CC → Logi",
+    "current": "Stworzyć schemat bazy events w log_store",
+    "current_file": "src/cm/sss_module/db/schema.sql",
+    "next": "- [ ] schema SQLite events (session_id, ts, round, kind, payload, file_path)\n- [ ] LogStore: insert_event, query_by_session, query_by_round, query_by_kind\n- [ ] IntakeView: pola prompt + nazwa + lokalizacja, walidacja, sygnał qt_start_clicked\n- [ ] ProjectSpawner: utworzenie katalogu, zapis intake.json, prompt → CC, VS Code subprocess\n- [ ] integracja z skill /sss: wywołanie init_project.py przez SSSBridge i log eventu\n- [ ] PlanWatcher: QTimer 60s, parsuje PLAN.md przez parser.py ze skilla, emituje sygnały zmian + log eventów\n- [ ] RoundWatcher: detekcja zmiany fazy przez state.py, czytanie pozostałych plików .md przy zmianie\n- [ ] LogsView: drzewo sesji, filtry round/kind, podgląd payload\n- [ ] migracja istniejącego przycisku Start CC na nowy flow (prompt + spawn)\n- [ ] testy pytest core modułów"
+  }
+}
