@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import json
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QFileSystemWatcher, QTimer
 from PySide6.QtWidgets import (
-    QMainWindow, QMessageBox, QStackedWidget,
+    QMainWindow, QMessageBox, QSplitter, QStackedWidget,
 )
+
+_RUN_LOG = Path.home() / ".claude" / "run_log.json"
 
 from src.models.resource import Resource
 from src.scanner.discovery import discover_all
+from src.scanner.indexer import build_tree
 from src.ui.editor_panel import EditorPanel
+from src.ui.tree_panel import TreePanel
 from src.ui.history_panel import HistoryPanel
 from src.ui.active_projects_panel import ActiveProjectsPanel
 from src.ui.website_projects_panel import WebsiteProjectsPanel
@@ -161,6 +168,7 @@ class MainWindow(QMainWindow):
         help_menu.addAction("&About", self._show_about)
 
     def _setup_ui(self) -> None:
+        self._tree_panel = TreePanel()
         self._editor_panel = EditorPanel()
         self._history_panel = HistoryPanel()
         self._active_projects_panel = ActiveProjectsPanel()
@@ -175,9 +183,22 @@ class MainWindow(QMainWindow):
         self._ingest_panel = IngestPanel() if IngestPanel is not None else None
         self._wiki_panel = WikiPanel() if WikiPanel is not None else None
 
+        # Resources view: tree (left) + editor (right)
+        self._resources_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._resources_splitter.addWidget(self._tree_panel)
+        self._resources_splitter.addWidget(self._editor_panel)
+        self._resources_splitter.setSizes([320, 900])
+        self._resources_splitter.setStretchFactor(0, 0)
+        self._resources_splitter.setStretchFactor(1, 1)
+
+        # Connect tree signals
+        self._tree_panel.resource_selected.connect(self._on_resource_selected)
+        self._tree_panel.project_detail_requested.connect(self._on_project_detail)
+        self._tree_panel.refresh_requested.connect(self._scan_resources)
+
         # Stacked widget — no tab bar, menu-driven navigation
         self._stack = QStackedWidget()
-        self._stack.addWidget(self._editor_panel)             # 0 = Resources (full width)
+        self._stack.addWidget(self._resources_splitter)       # 0 = Resources
         self._stack.addWidget(self._history_panel)            # 1 = Projects
         self._stack.addWidget(self._active_projects_panel)    # 2 = Active Projects
         self._stack.addWidget(self._website_projects_panel)   # 3 = Websites
@@ -211,6 +232,18 @@ class MainWindow(QMainWindow):
         self._status_bar = StatusBar()
         self.setStatusBar(self._status_bar)
 
+        # Obserwuj run_log.json — powiadomienia o skryptach Pythona
+        self._run_log_watcher = QFileSystemWatcher(self)
+        if _RUN_LOG.exists():
+            self._run_log_watcher.addPath(str(_RUN_LOG))
+        self._run_log_watcher.fileChanged.connect(self._on_run_log_changed)
+        # Jeśli plik jeszcze nie istnieje, sprawdzaj co 10s aż powstanie
+        self._run_log_poll = QTimer(self)
+        self._run_log_poll.setInterval(10_000)
+        self._run_log_poll.timeout.connect(self._run_log_poll_tick)
+        if not _RUN_LOG.exists():
+            self._run_log_poll.start()
+
         # Connect signals
         self._projektant_panel.project_ready.connect(self._on_project_ready)
         self._history_panel.active_projects_changed.connect(self._active_projects_panel.refresh)
@@ -219,7 +252,7 @@ class MainWindow(QMainWindow):
         self._hidden_projects_panel.project_unhidden.connect(self._history_panel.refresh)
 
     def _scan_resources(self) -> None:
-        """Scan all resources and update status / welcome screen."""
+        """Scan all resources and update tree + status bar."""
         self._status_bar.set_status("Scanning resources...")
 
         managed, user, projects, external = discover_all()
@@ -232,6 +265,9 @@ class MainWindow(QMainWindow):
         )
         self._status_bar.set_status("Ready")
         self._status_bar.show_scan_summary(total)
+
+        tree_root = build_tree(managed, user, projects, external)
+        self._tree_panel.populate(tree_root)
 
         if self._editor_panel._current_resource is None:
             self._editor_panel.show_welcome(
@@ -621,6 +657,33 @@ class MainWindow(QMainWindow):
         data["messages"] = collect(lst_msg)
         self._cc_panel_save_settings(data)
         self._status_bar.set_status("cc-panel: listy dropdown zapisane")
+
+    def _run_log_poll_tick(self) -> None:
+        """Sprawdzaj co 10s czy run_log.json już istnieje i podepnij watcher."""
+        if _RUN_LOG.exists():
+            self._run_log_watcher.addPath(str(_RUN_LOG))
+            self._run_log_poll.stop()
+
+    def _on_run_log_changed(self, path: str) -> None:
+        """Odczytaj ostatni wpis z run_log.json i pokaż w status barze."""
+        log_path = Path(path)
+        # QFileSystemWatcher traci ścieżkę po nadpisaniu pliku — re-add
+        if path not in self._run_log_watcher.files():
+            if log_path.exists():
+                self._run_log_watcher.addPath(path)
+        if not log_path.exists():
+            return
+        try:
+            entries = json.loads(log_path.read_text(encoding="utf-8"))
+            if not isinstance(entries, list) or not entries:
+                return
+            last = entries[-1]
+            self._status_bar.show_script_running(
+                cmd=last.get("cmd", ""),
+                ts=last.get("ts", ""),
+            )
+        except Exception:
+            pass
 
     def _show_about(self) -> None:
         QMessageBox.about(

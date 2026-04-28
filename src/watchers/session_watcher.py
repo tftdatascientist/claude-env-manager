@@ -186,6 +186,62 @@ def read_transcript_tail(path: str, n_messages: int = 5) -> list[dict]:
         return []
 
 
+def read_transcript_messages(
+    path: str | Path,
+    n: int = 60,
+    max_bytes: int = 400_000,
+) -> list[dict]:
+    """Odczytuje ostatnie n wiadomości user/assistant z transkryptu JSONL.
+
+    Zwraca listę słowników {type, text, ts} posortowaną chronologicznie.
+    Pole ts to datetime lub None. Tekst asystenta jest pełny (nie skracany).
+    """
+    try:
+        p = Path(path)
+        if not p.exists():
+            return []
+        size = p.stat().st_size
+        buf_size = min(max_bytes, size)
+        with p.open("rb") as f:
+            f.seek(max(0, size - buf_size))
+            raw = f.read()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        results: list[dict] = []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entry_type = entry.get("type")
+            if entry_type not in ("user", "assistant"):
+                continue
+            msg = entry.get("message", {})
+            content = msg.get("content", [])
+            text = ""
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        break
+            elif isinstance(content, str):
+                text = content
+            if not text.strip():
+                continue
+            ts: datetime | None = None
+            raw_ts = entry.get("timestamp") or msg.get("timestamp")
+            if raw_ts:
+                ts = _parse_iso(str(raw_ts))
+            results.append({"type": entry_type, "text": text, "ts": ts})
+            if len(results) >= n:
+                break
+        return list(reversed(results))
+    except OSError:
+        return []
+
+
 def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None

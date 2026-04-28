@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import difflib
+import json
 import re
+import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QProcess, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
@@ -889,6 +892,428 @@ class PccView(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# SSS helpers
+# ---------------------------------------------------------------------------
+
+def _find_cc_sss() -> str | None:
+    """Zwraca ścieżkę do claude/cc CLI."""
+    home = Path.home()
+    if sys.platform == "win32":
+        npm = home / "AppData" / "Roaming" / "npm"
+        exe = npm / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+        if exe.exists():
+            return str(exe)
+        for c in [npm / "claude.CMD", npm / "claude.cmd", npm / "cc.cmd", npm / "cc"]:
+            if c.exists():
+                return str(c)
+    return shutil.which("cc") or shutil.which("claude")
+
+
+def _sss_scripts_dir() -> Path:
+    """Ścieżka do katalogu skryptów SSS."""
+    return Path.home() / ".claude" / "skills" / "sss" / "scripts"
+
+
+# ---------------------------------------------------------------------------
+# SssRundaWstepnaPanel — Runda Wstępna SSS osadzona w Projektancie
+# ---------------------------------------------------------------------------
+
+class SssRundaWstepnaPanel(QWidget):
+    """Panel Rundy Wstępnej SSS — zbiera opis projektu, generuje intake.json,
+    uruchamia init_project.py i zwraca gotowy katalog projektu."""
+
+    project_initialized = Signal(Path)  # emitowany po akceptacji projektu
+
+    _PYTANIA_PROMPT = (
+        "Jesteś asystentem planowania projektów programistycznych.\n"
+        "User opisał swój projekt. Zadaj DOKŁADNIE 3 pytania, które rozwiążą "
+        "największe niejasności potrzebne do zainicjowania projektu.\n"
+        "Jedno pytanie = jeden konkret, bez alternatyw.\n"
+        "Format: wyłącznie lista 3 pytań w stylu markdown:\n"
+        "1. Pytanie pierwsze\n2. Pytanie drugie\n3. Pytanie trzecie\n\n"
+        "Opis projektu od usera:\n{opis}"
+    )
+
+    _INTAKE_PROMPT = (
+        "Jesteś asystentem inicjalizacji projektów. Na podstawie opisu projektu "
+        "i odpowiedzi na pytania wygeneruj JSON w ściśle określonym formacie.\n\n"
+        "Odpowiedz WYŁĄCZNIE poprawnym JSON — bez komentarzy, bez bloków ```.\n\n"
+        'Format (wszystkie pola wymagane, wartości po polsku, puste = ""):\n'
+        "{\n"
+        '  "project": {"title": "...", "type": "...", "client": "...", '
+        '"stack": "...", "one_liner": "..."},\n'
+        '  "claude": {"off_limits": "...", "specifics": "..."},\n'
+        '  "architecture": {"overview": "...", "components": "...", '
+        '"data_flow": "...", "decisions": "...", "constraints": "..."},\n'
+        '  "conventions": {"naming": "...", "file_layout": "...", "anti_patterns": "..."},\n'
+        '  "plan": {"goal": "...", "current": "...", "current_file": "...", "next": "..."}\n'
+        "}\n\n"
+        "Opis projektu:\n{opis}\n\n"
+        "Odpowiedzi na pytania:\n{odpowiedzi}"
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project_path: Path | None = None
+        self._process: QProcess | None = None
+        self._mode: str = ""  # "pytania" | "intake" | "init"
+        self._output_buf: str = ""
+        self._intake_json: dict = {}
+        self._setup_ui()
+
+    def set_project_path(self, path: Path | None) -> None:
+        self._project_path = path
+        self._lbl_target.setText(str(path) if path else "(brak — wskaż projekt)")
+        self._btn_init.setEnabled(bool(path))
+
+    def _setup_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        # Nagłówek
+        hdr = QHBoxLayout()
+        title = QLabel("★ Runda Wstępna SSS")
+        title.setStyleSheet("color:#e5c07b;font-size:13px;font-weight:bold;")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        self._badge = QLabel("")
+        self._badge.setStyleSheet(
+            "background:#1a3a1a;color:#98c379;border-radius:3px;"
+            "padding:2px 8px;font-size:10px;font-weight:bold;"
+        )
+        self._badge.setVisible(False)
+        hdr.addWidget(self._badge)
+        root.addLayout(hdr)
+
+        desc = QLabel(
+            "Opisz projekt — AI zada 3 pytania, po odpowiedziach wygeneruje "
+            "strukturę DPS (CLAUDE.md, ARCHITECTURE.md, PLAN.md, CONVENTIONS.md)."
+        )
+        desc.setStyleSheet("color:#5c6370;font-size:10px;")
+        desc.setWordWrap(True)
+        root.addWidget(desc)
+
+        # Katalog docelowy
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Katalog projektu:", styleSheet="color:#9cdcfe;font-size:10px;"))
+        self._lbl_target = QLabel("(brak)")
+        self._lbl_target.setStyleSheet("color:#5c6370;font-size:10px;font-family:Consolas;")
+        self._lbl_target.setWordWrap(True)
+        target_row.addWidget(self._lbl_target, 1)
+        btn_browse = QPushButton("Zmień…")
+        btn_browse.setStyleSheet(_S["btn"])
+        btn_browse.setFixedHeight(22)
+        btn_browse.clicked.connect(self._browse_target)
+        target_row.addWidget(btn_browse)
+        root.addLayout(target_row)
+
+        sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setStyleSheet("color:#3e4451;")
+        root.addWidget(sep1)
+
+        # Splitter: góra (wejście) / dół (AI)
+        v_split = QSplitter(Qt.Orientation.Vertical)
+
+        # ── Góra: opis + pytania + odpowiedzi ───────────────────────────
+        top_w = QWidget()
+        top_lay = QVBoxLayout(top_w)
+        top_lay.setContentsMargins(0, 0, 0, 0)
+        top_lay.setSpacing(6)
+
+        top_lay.addWidget(QLabel("Opis projektu:", styleSheet="color:#9cdcfe;font-size:10px;font-weight:bold;"))
+        self._opis_edit = QPlainTextEdit()
+        self._opis_edit.setFont(QFont("Consolas", 9))
+        self._opis_edit.setFixedHeight(90)
+        self._opis_edit.setPlaceholderText(
+            "Opisz: co budujesz, dla kogo, stack, główny cel, constraints…"
+        )
+        self._opis_edit.setStyleSheet(_S["editor"])
+        top_lay.addWidget(self._opis_edit)
+
+        btn_row1 = QHBoxLayout()
+        self._btn_pytania = QPushButton("▶ Generuj 3 pytania")
+        self._btn_pytania.setStyleSheet(_S["new"])
+        self._btn_pytania.clicked.connect(self._on_pytania)
+        btn_row1.addWidget(self._btn_pytania)
+        self._btn_stop = QPushButton("■ Stop")
+        self._btn_stop.setStyleSheet(_S["discard"])
+        self._btn_stop.clicked.connect(self._on_stop)
+        self._btn_stop.setEnabled(False)
+        btn_row1.addWidget(self._btn_stop)
+        btn_row1.addStretch()
+        self._lbl_status = QLabel("", styleSheet="color:#5c6370;font-size:10px;")
+        btn_row1.addWidget(self._lbl_status)
+        top_lay.addLayout(btn_row1)
+
+        top_lay.addWidget(QLabel("Pytania AI:", styleSheet="color:#9cdcfe;font-size:10px;font-weight:bold;"))
+        self._pytania_view = QPlainTextEdit()
+        self._pytania_view.setFont(QFont("Consolas", 9))
+        self._pytania_view.setReadOnly(True)
+        self._pytania_view.setFixedHeight(80)
+        self._pytania_view.setStyleSheet(
+            "QPlainTextEdit{background:#0d1117;color:#61afef;"
+            "border:1px solid #1a3a4a;border-radius:3px;padding:4px;}"
+        )
+        self._pytania_view.setPlaceholderText("Tutaj pojawią się 3 pytania AI…")
+        top_lay.addWidget(self._pytania_view)
+
+        top_lay.addWidget(QLabel("Twoje odpowiedzi:", styleSheet="color:#9cdcfe;font-size:10px;font-weight:bold;"))
+        self._odpowiedzi_edit = QPlainTextEdit()
+        self._odpowiedzi_edit.setFont(QFont("Consolas", 9))
+        self._odpowiedzi_edit.setFixedHeight(80)
+        self._odpowiedzi_edit.setPlaceholderText("1. …\n2. …\n3. …")
+        self._odpowiedzi_edit.setStyleSheet(_S["editor"])
+        top_lay.addWidget(self._odpowiedzi_edit)
+
+        btn_row2 = QHBoxLayout()
+        self._btn_intake = QPushButton("▶ Generuj intake.json")
+        self._btn_intake.setStyleSheet(_S["btn"])
+        self._btn_intake.setEnabled(False)
+        self._btn_intake.clicked.connect(self._on_intake)
+        btn_row2.addWidget(self._btn_intake)
+        btn_row2.addStretch()
+        top_lay.addLayout(btn_row2)
+
+        v_split.addWidget(top_w)
+
+        # ── Dół: podgląd intake + inicjalizacja ─────────────────────────
+        bot_w = QWidget()
+        bot_lay = QVBoxLayout(bot_w)
+        bot_lay.setContentsMargins(0, 0, 0, 0)
+        bot_lay.setSpacing(6)
+
+        bot_lay.addWidget(QLabel("Podgląd intake.json:", styleSheet="color:#9cdcfe;font-size:10px;font-weight:bold;"))
+        self._intake_view = QPlainTextEdit()
+        self._intake_view.setFont(QFont("Consolas", 9))
+        self._intake_view.setStyleSheet(
+            "QPlainTextEdit{background:#0d1117;color:#98c379;"
+            "border:1px solid #1a3a4a;border-radius:3px;padding:4px;}"
+        )
+        self._intake_view.setPlaceholderText("Tu pojawi się wygenerowany intake.json…")
+        bot_lay.addWidget(self._intake_view, 1)
+
+        bot_lay.addWidget(QLabel("Wynik init_project.py:", styleSheet="color:#9cdcfe;font-size:10px;font-weight:bold;"))
+        self._init_view = QPlainTextEdit()
+        self._init_view.setFont(QFont("Consolas", 9))
+        self._init_view.setReadOnly(True)
+        self._init_view.setFixedHeight(60)
+        self._init_view.setStyleSheet(
+            "QPlainTextEdit{background:#0d1117;color:#e5c07b;"
+            "border:1px solid #3a3a1a;border-radius:3px;padding:4px;}"
+        )
+        bot_lay.addWidget(self._init_view)
+
+        btn_row3 = QHBoxLayout()
+        self._btn_init = QPushButton("✦ Inicjuj projekt (init_project.py)")
+        self._btn_init.setStyleSheet(_S["save"])
+        self._btn_init.setEnabled(False)
+        self._btn_init.clicked.connect(self._on_init)
+        btn_row3.addWidget(self._btn_init)
+
+        self._btn_accept = QPushButton("✓ Akceptuj i otwórz projekt")
+        self._btn_accept.setStyleSheet(
+            "QPushButton{background:#1a2a3a;color:#61afef;"
+            "border:1px solid #2a4a6a;border-radius:3px;padding:4px 14px;font-weight:bold}"
+            "QPushButton:hover{background:#2a4a6a}"
+            "QPushButton:disabled{color:#5c5c5c;border-color:#383838}"
+        )
+        self._btn_accept.setEnabled(False)
+        self._btn_accept.clicked.connect(self._on_accept)
+        btn_row3.addWidget(self._btn_accept)
+        btn_row3.addStretch()
+        bot_lay.addLayout(btn_row3)
+
+        v_split.addWidget(bot_w)
+        v_split.setSizes([320, 280])
+        root.addWidget(v_split, 1)
+
+    # ── Akcje ────────────────────────────────────────────────────────────
+
+    def _browse_target(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Wskaż katalog projektu")
+        if path:
+            self.set_project_path(Path(path))
+
+    def _on_pytania(self) -> None:
+        opis = self._opis_edit.toPlainText().strip()
+        if not opis:
+            QMessageBox.warning(self, "SSS", "Opisz projekt przed generowaniem pytań.")
+            return
+        cc = _find_cc_sss()
+        if not cc:
+            QMessageBox.warning(self, "SSS", "Nie znaleziono claude/cc w PATH.")
+            return
+        prompt = self._PYTANIA_PROMPT.format(opis=opis)
+        self._start_ai(cc, prompt, mode="pytania")
+
+    def _on_intake(self) -> None:
+        opis = self._opis_edit.toPlainText().strip()
+        odpowiedzi = self._odpowiedzi_edit.toPlainText().strip()
+        cc = _find_cc_sss()
+        if not cc:
+            QMessageBox.warning(self, "SSS", "Nie znaleziono claude/cc w PATH.")
+            return
+        prompt = self._INTAKE_PROMPT.format(opis=opis, odpowiedzi=odpowiedzi or "(brak)")
+        self._start_ai(cc, prompt, mode="intake")
+
+    def _on_init(self) -> None:
+        if not self._project_path:
+            QMessageBox.warning(self, "SSS", "Wskaż katalog projektu.")
+            return
+        intake_text = self._intake_view.toPlainText().strip()
+        if not intake_text:
+            QMessageBox.warning(self, "SSS", "Brak intake.json — wygeneruj go najpierw.")
+            return
+        try:
+            self._intake_json = json.loads(intake_text)
+        except json.JSONDecodeError as e:
+            QMessageBox.critical(self, "SSS", f"Niepoprawny JSON:\n{e}")
+            return
+
+        intake_path = self._project_path / "intake.json"
+        try:
+            intake_path.write_text(json.dumps(self._intake_json, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as e:
+            QMessageBox.critical(self, "SSS", f"Nie można zapisać intake.json:\n{e}")
+            return
+
+        scripts_dir = _sss_scripts_dir()
+        init_script = scripts_dir / "init_project.py"
+        if not init_script.exists():
+            QMessageBox.critical(self, "SSS", f"Brak skryptu:\n{init_script}")
+            return
+
+        python = shutil.which("python") or shutil.which("python3") or sys.executable
+        self._init_view.clear()
+        self._lbl_status.setText("Inicjalizuję projekt…")
+        self._btn_init.setEnabled(False)
+        self._mode = "init"
+
+        self._process = QProcess(self)
+        self._process.readyReadStandardOutput.connect(self._on_stdout)
+        self._process.readyReadStandardError.connect(self._on_stderr)
+        self._process.finished.connect(self._on_finished)
+        self._process.setProgram(python)
+        self._process.setArguments([
+            str(init_script),
+            "--intake", str(intake_path),
+            "--target", str(self._project_path),
+        ])
+        self._process.start()
+        if not self._process.waitForStarted(3000):
+            self._lbl_status.setText("Błąd startu skryptu")
+            self._btn_init.setEnabled(True)
+
+    def _on_accept(self) -> None:
+        if self._project_path:
+            self.project_initialized.emit(self._project_path)
+            self._badge.setText("✓ Projekt gotowy")
+            self._badge.setVisible(True)
+
+    def _on_stop(self) -> None:
+        if self._process and self._process.state() != QProcess.ProcessState.NotRunning:
+            self._process.kill()
+        self._lbl_status.setText("Przerwano")
+        self._btn_pytania.setEnabled(True)
+        self._btn_stop.setEnabled(False)
+
+    # ── AI process helpers ───────────────────────────────────────────────
+
+    def _start_ai(self, cc: str, prompt: str, mode: str) -> None:
+        self._mode = mode
+        self._output_buf = ""
+        if mode == "pytania":
+            self._pytania_view.clear()
+        else:
+            self._intake_view.clear()
+        self._btn_pytania.setEnabled(False)
+        self._btn_intake.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._lbl_status.setText("AI pracuje…")
+
+        self._process = QProcess(self)
+        self._process.setProgram(cc)
+        self._process.setArguments(["--print", "--output-format", "stream-json"])
+        self._process.readyReadStandardOutput.connect(self._on_stdout)
+        self._process.readyReadStandardError.connect(self._on_stderr)
+        self._process.finished.connect(self._on_finished)
+        self._process.start()
+        if not self._process.waitForStarted(3000):
+            self._lbl_status.setText("Błąd startu AI")
+            self._btn_pytania.setEnabled(True)
+            self._btn_stop.setEnabled(False)
+            return
+        self._process.write(prompt.encode("utf-8"))
+        self._process.closeWriteChannel()
+
+    def _on_stdout(self) -> None:
+        if not self._process:
+            return
+        raw = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if self._mode == "init":
+                self._init_view.moveCursor(QTextCursor.MoveOperation.End)
+                self._init_view.insertPlainText(line + "\n")
+                continue
+            try:
+                obj = json.loads(line)
+                chunk = ""
+                if obj.get("type") == "content_block_delta":
+                    chunk = obj.get("delta", {}).get("text", "")
+                elif obj.get("type") == "text":
+                    chunk = obj.get("text", "")
+                elif obj.get("type") == "result":
+                    chunk = obj.get("result", "")
+                if chunk:
+                    self._output_buf += chunk
+                    target = self._pytania_view if self._mode == "pytania" else self._intake_view
+                    target.moveCursor(QTextCursor.MoveOperation.End)
+                    target.insertPlainText(chunk)
+            except (json.JSONDecodeError, KeyError):
+                self._output_buf += line + "\n"
+                target = self._pytania_view if self._mode == "pytania" else self._intake_view
+                target.moveCursor(QTextCursor.MoveOperation.End)
+                target.insertPlainText(line + "\n")
+
+    def _on_stderr(self) -> None:
+        if not self._process:
+            return
+        raw = bytes(self._process.readAllStandardError()).decode("utf-8", errors="replace")
+        if raw.strip() and self._mode != "init":
+            target = self._pytania_view if self._mode == "pytania" else self._intake_view
+            target.moveCursor(QTextCursor.MoveOperation.End)
+            target.insertPlainText(f"[STDERR] {raw}")
+
+    def _on_finished(self, exit_code: int, _status) -> None:
+        self._btn_pytania.setEnabled(True)
+        self._btn_stop.setEnabled(False)
+        if self._mode == "pytania":
+            has = bool(self._output_buf.strip())
+            self._btn_intake.setEnabled(has)
+            self._lbl_status.setText("Gotowe — wpisz odpowiedzi" if has else f"Błąd (kod {exit_code})")
+        elif self._mode == "intake":
+            raw = self._output_buf.strip()
+            # Wyciągnij JSON jeśli owinięty w ```json
+            m = re.search(r"```(?:json)?\s*([\s\S]+?)```", raw)
+            if m:
+                raw = m.group(1).strip()
+                self._intake_view.setPlainText(raw)
+            self._btn_init.setEnabled(bool(raw) and bool(self._project_path))
+            self._lbl_status.setText("Sprawdź intake.json i kliknij Inicjuj" if raw else f"Błąd (kod {exit_code})")
+        elif self._mode == "init":
+            self._btn_init.setEnabled(True)
+            if exit_code == 0:
+                self._btn_accept.setEnabled(True)
+                self._lbl_status.setText("Projekt zainicjowany — akceptuj lub popraw")
+            else:
+                self._lbl_status.setText(f"Błąd inicjalizacji (kod {exit_code})")
+
+
+# ---------------------------------------------------------------------------
 # NewProjectDialog (bez zmian)
 # ---------------------------------------------------------------------------
 
@@ -1065,6 +1490,18 @@ class ProjectantPanel(QWidget):
         btn_ai.clicked.connect(self._open_ai_wizard)
         top.addWidget(btn_ai)
 
+        btn_sss = QPushButton("★ Runda Wstępna")
+        btn_sss.setStyleSheet(
+            "QPushButton{background:#2a1a00;color:#e5c07b;border:1px solid #5a4000;"
+            "border-radius:3px;padding:4px 10px;font-size:11px;font-weight:bold;}"
+            "QPushButton:hover{background:#3a2a00;}"
+            "QPushButton:checked{background:#3a2a00;border-color:#e5c07b;}"
+        )
+        btn_sss.setCheckable(True)
+        btn_sss.clicked.connect(self._toggle_sss_panel)
+        top.addWidget(btn_sss)
+        self._btn_sss = btn_sss
+
         root.addLayout(top)
 
         self._path_label = QLabel()
@@ -1132,6 +1569,10 @@ class ProjectantPanel(QWidget):
         self._empty_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_view.setStyleSheet("color:#5c6370;font-size:13px;")
         self._view_stack.addWidget(self._empty_view)  # index 2
+
+        self._sss_panel = SssRundaWstepnaPanel()
+        self._sss_panel.project_initialized.connect(self._on_sss_project_initialized)
+        self._view_stack.addWidget(self._sss_panel)   # index 3
 
         splitter.addWidget(self._view_stack)
         splitter.setSizes([220, 980])
@@ -1240,6 +1681,7 @@ class ProjectantPanel(QWidget):
             self._file_list.addItem(item)
 
     def _on_file_selected(self, current: QListWidgetItem | None, _prev) -> None:
+        self._btn_sss.setChecked(False)
         if current is None or self._project_path is None:
             self._view_stack.setCurrentIndex(2)
             self._current_file = None
@@ -1296,6 +1738,29 @@ class ProjectantPanel(QWidget):
     def _open_in_editor(self) -> None:
         if self._current_file and self._current_file.exists():
             subprocess.Popen(["start", "", str(self._current_file)], shell=True)
+
+    def _toggle_sss_panel(self, checked: bool) -> None:
+        if checked:
+            self._sss_panel.set_project_path(self._project_path)
+            self._view_stack.setCurrentIndex(3)
+        else:
+            self._view_stack.setCurrentIndex(2)
+            self._file_list.clearSelection()
+
+    def _on_sss_project_initialized(self, path: Path) -> None:
+        self._btn_sss.setChecked(False)
+        display = path.name
+        already = any(
+            self._project_combo.itemData(i) == str(path)
+            for i in range(self._project_combo.count())
+        )
+        if not already:
+            self._project_combo.blockSignals(True)
+            self._project_combo.addItem(display, str(path))
+            self._project_combo.blockSignals(False)
+        self._set_project(path)
+        self.project_ready.emit(path)
+        self._view_stack.setCurrentIndex(2)
 
     def _open_wizard(self) -> None:
         if self._project_path is None:

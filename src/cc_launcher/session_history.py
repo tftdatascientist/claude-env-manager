@@ -220,6 +220,42 @@ def _count_transcripts(project_path: str) -> tuple[int, Optional[datetime]]:
     return count, last_at
 
 
+def find_latest_transcript(project_path: str) -> Path | None:
+    """Zwraca ścieżkę najnowszego transkryptu JSONL dla projektu lub None."""
+    if not _PROJECTS_PATH.is_dir() or not project_path:
+        return None
+    norm = Path(project_path).resolve()
+    target_dir: Path | None = None
+    try:
+        for proj_dir in _PROJECTS_PATH.iterdir():
+            if not proj_dir.is_dir():
+                continue
+            try:
+                from urllib.parse import unquote
+                decoded = unquote(proj_dir.name).replace("%5C", "\\").replace("%2F", "/")
+                if Path(decoded).resolve() == norm:
+                    target_dir = proj_dir
+                    break
+            except Exception:
+                continue
+    except OSError:
+        return None
+    if target_dir is None:
+        return None
+    best: Path | None = None
+    best_mtime = 0.0
+    try:
+        for f in target_dir.iterdir():
+            if f.suffix == ".jsonl" and f.is_file():
+                mtime = f.stat().st_mtime
+                if mtime > best_mtime:
+                    best_mtime = mtime
+                    best = f
+    except OSError:
+        pass
+    return best
+
+
 def fmt_duration(seconds: int) -> str:
     """Formatuje czas trwania sesji.
 

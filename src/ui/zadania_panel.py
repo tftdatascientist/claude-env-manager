@@ -22,9 +22,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
-    QScrollArea,
     QSplitter,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -441,7 +439,7 @@ class _AiPanel(QWidget):
 
         self._process = QProcess(self)
         self._process.setProgram(cc)
-        self._process.setArguments(["-p", prompt, "--output-format", "stream-json", "--no-cwd"])
+        self._process.setArguments(["--print", "--output-format", "stream-json"])
         self._process.readyReadStandardOutput.connect(self._on_stdout)
         self._process.readyReadStandardError.connect(self._on_stderr)
         self._process.finished.connect(self._on_finished)
@@ -451,6 +449,10 @@ class _AiPanel(QWidget):
             self._lbl_ai_status.setText("Błąd startu procesu")
             self._btn_run.setEnabled(True)
             self._btn_stop_ai.setEnabled(False)
+            return
+
+        self._process.write(prompt.encode("utf-8"))
+        self._process.closeWriteChannel()
 
     def _on_stdout(self) -> None:
         if not self._process:
@@ -539,9 +541,9 @@ class ZadaniaPanel(QWidget):
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
+        root.setSpacing(4)
 
-        # Nagłówek
+        # Nagłówek + pasek ścieżki
         hdr = QHBoxLayout()
         title = QLabel("Zadania — PLAN.md")
         title.setStyleSheet("color:#cccccc;font-size:13px;font-weight:bold;")
@@ -555,8 +557,6 @@ class ZadaniaPanel(QWidget):
         self._lbl_badge.setVisible(False)
         hdr.addWidget(self._lbl_badge)
         root.addLayout(hdr)
-
-        root.addWidget(_sep())
 
         # Pasek ścieżki
         path_row = QHBoxLayout()
@@ -577,127 +577,201 @@ class ZadaniaPanel(QWidget):
         self._btn_reload.clicked.connect(self._reload)
         self._btn_reload.setEnabled(False)
         path_row.addWidget(self._btn_reload)
+
+        self._btn_oczyszczenie = QPushButton("Oczyszczenie")
+        self._btn_oczyszczenie.setStyleSheet(_BTN_WARN)
+        self._btn_oczyszczenie.setToolTip(
+            "Archiwizuje Done → ARCHIWUM.md, czyści sekcje Done i Current, resetuje status"
+        )
+        self._btn_oczyszczenie.clicked.connect(self._on_archive)
+        self._btn_oczyszczenie.setEnabled(False)
+        path_row.addWidget(self._btn_oczyszczenie)
+
+        self._lbl_hint = QLabel("")
+        self._lbl_hint.setStyleSheet(_LBL_DIM)
+        self._lbl_hint.setFont(_FONT_SMALL)
+        path_row.addWidget(self._lbl_hint)
         root.addLayout(path_row)
 
-        # Splitter pionowy: góra = meta/current, dół = zakładki (Next | AI)
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        root.addWidget(_sep())
 
-        # -- Górna: Meta + Current (scrollowana)
-        top_scroll = QScrollArea()
-        top_scroll.setWidgetResizable(True)
-        top_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        top_inner = QWidget()
-        top_lay = QVBoxLayout(top_inner)
-        top_lay.setContentsMargins(0, 0, 0, 0)
-        top_lay.setSpacing(6)
+        # Główny układ: cztery okna w siatce 2×2 przez zagnieżdżone splittery
+        # ┌──────────────┬──────────────┐
+        # │  Kontekst    │     Cel      │
+        # ├──────────────┼──────────────┤
+        # │   Zadania    │  Wykonane    │
+        # └──────────────┴──────────────┘
+        v_split = QSplitter(Qt.Orientation.Vertical)
 
-        meta_card = QFrame()
-        meta_card.setStyleSheet(_CARD)
-        meta_cl = QVBoxLayout(meta_card)
-        meta_cl.setContentsMargins(8, 6, 8, 6)
-        meta_cl.setSpacing(2)
-        meta_cl.addWidget(QLabel("Stan planu", styleSheet=_LBL_HEAD))
-        self._lbl_status = QLabel("—", styleSheet=_LBL_VAL)
-        self._lbl_goal = QLabel("—", styleSheet=_LBL_VAL, wordWrap=True)
-        self._lbl_session = QLabel("—", styleSheet=_LBL_DIM)
-        for key, lbl in [
-            ("Status:", self._lbl_status),
-            ("Cel:", self._lbl_goal),
-            ("Sesja:", self._lbl_session),
-        ]:
-            row = QHBoxLayout()
-            k = QLabel(key, styleSheet=_LBL_KEY)
-            k.setFixedWidth(60)
-            row.addWidget(k)
-            row.addWidget(lbl, stretch=1)
-            meta_cl.addLayout(row)
-        top_lay.addWidget(meta_card)
+        # Górny rząd: Kontekst | Cel
+        top_h_split = QSplitter(Qt.Orientation.Horizontal)
+        top_h_split.addWidget(self._build_context_pane())
+        top_h_split.addWidget(self._build_goal_pane())
+        top_h_split.setSizes([1, 1])
 
-        cur_card = QFrame()
-        cur_card.setStyleSheet(_CARD)
-        cur_cl = QVBoxLayout(cur_card)
-        cur_cl.setContentsMargins(8, 6, 8, 6)
-        cur_cl.setSpacing(2)
-        cur_cl.addWidget(QLabel("Aktywne zadanie", styleSheet=_LBL_HEAD))
-        self._lbl_cur_task = QLabel("—", styleSheet=_LBL_VAL, wordWrap=True)
-        self._lbl_cur_task.setFont(_FONT_MONO)
-        cur_cl.addWidget(self._lbl_cur_task)
-        top_lay.addWidget(cur_card)
+        # Dolny rząd: Zadania | Wykonane
+        bot_h_split = QSplitter(Qt.Orientation.Horizontal)
+        bot_h_split.addWidget(self._build_next_pane())
+        bot_h_split.addWidget(self._build_done_pane())
+        bot_h_split.setSizes([1, 1])
 
-        top_lay.addStretch()
-        top_scroll.setWidget(top_inner)
-        splitter.addWidget(top_scroll)
+        v_split.addWidget(top_h_split)
+        v_split.addWidget(bot_h_split)
+        v_split.setSizes([1, 1])
 
-        # -- Dolna: zakładki Next i AI
-        bottom_tabs = QTabWidget()
-        bottom_tabs.setDocumentMode(True)
-        bottom_tabs.setStyleSheet(
-            "QTabBar::tab{background:#2d2d2d;color:#aaaaaa;padding:4px 12px;"
-            "border:none;margin-right:2px;border-radius:3px 3px 0 0;}"
-            "QTabBar::tab:selected{background:#007acc;color:#ffffff;}"
-            "QTabBar::tab:hover:!selected{background:#3c3c3c;color:#cccccc;}"
-        )
-
-        # Zakładka Next
-        next_w = self._build_next_tab()
-        bottom_tabs.addTab(next_w, "Next")
-
-        # Zakładka AI
+        # Zakładka AI — osobna sekcja pod siatką, zwinięta domyślnie
         self._ai_panel = _AiPanel()
         self._ai_panel.set_apply_callback(self._on_ai_apply)
-        bottom_tabs.addTab(self._ai_panel, "✦ AI")
 
-        splitter.addWidget(bottom_tabs)
-        splitter.setSizes([150, 500])
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        root.addWidget(splitter, stretch=1)
+        ai_container = QFrame()
+        ai_container.setStyleSheet(_CARD)
+        ai_lay = QVBoxLayout(ai_container)
+        ai_lay.setContentsMargins(4, 4, 4, 4)
+        ai_lay.setSpacing(2)
+        ai_hdr = QHBoxLayout()
+        ai_hdr.addWidget(QLabel("✦ AI", styleSheet=_LBL_HEAD))
+        ai_hdr.addStretch()
+        self._btn_toggle_ai = QPushButton("Rozwiń")
+        self._btn_toggle_ai.setStyleSheet(_BTN_PURPLE)
+        self._btn_toggle_ai.setFixedWidth(80)
+        self._btn_toggle_ai.clicked.connect(self._on_toggle_ai)
+        ai_hdr.addWidget(self._btn_toggle_ai)
+        ai_lay.addLayout(ai_hdr)
+        self._ai_panel.setVisible(False)
+        ai_lay.addWidget(self._ai_panel)
 
-    def _build_next_tab(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 4, 0, 0)
+        root.addWidget(v_split, stretch=1)
+        root.addWidget(ai_container)
+
+    # -- Cztery panele siatki ------------------------------------------------
+
+    def _make_pane(self, title: str, color: str) -> tuple[QWidget, QVBoxLayout]:
+        """Tworzy ramkę panelu z nagłówkiem; zwraca (widget, layout na treść)."""
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame{{background:#1e1e1e;border:1px solid #3c3c3c;border-radius:4px;}}"
+        )
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(6, 4, 6, 6)
         lay.setSpacing(4)
+        hdr = QLabel(title)
+        hdr.setStyleSheet(f"color:{color};font-size:11px;font-weight:bold;background:transparent;border:none;")
+        lay.addWidget(hdr)
+        lay.addWidget(_sep())
+        return frame, lay
 
-        next_hdr = QHBoxLayout()
-        next_hdr.addWidget(QLabel("Następne zadania (SECTION:next)", styleSheet=_LBL_HEAD))
-        next_hdr.addStretch()
-        self._btn_save = QPushButton("Zapisz")
-        self._btn_save.setStyleSheet(_BTN_ACCENT)
-        self._btn_save.setEnabled(False)
-        self._btn_save.clicked.connect(self._on_save_next)
-        next_hdr.addWidget(self._btn_save)
-        lay.addLayout(next_hdr)
+    def _build_context_pane(self) -> QWidget:
+        frame, lay = self._make_pane("Kontekst", "#9cdcfe")
+        self._context_edit = QPlainTextEdit()
+        self._context_edit.setFont(_FONT_MONO)
+        self._context_edit.setPlaceholderText("Opis projektu, tła, zależności…")
+        self._context_edit.setStyleSheet(
+            "QPlainTextEdit{background:#141414;color:#cccccc;"
+            "border:none;padding:4px;}"
+        )
+        self._context_edit.textChanged.connect(self._on_context_changed)
+        lay.addWidget(self._context_edit, stretch=1)
+
+        self._btn_save_context = QPushButton("Zapisz kontekst")
+        self._btn_save_context.setStyleSheet(_BTN_ACCENT)
+        self._btn_save_context.setEnabled(False)
+        self._btn_save_context.clicked.connect(self._on_save_context)
+        lay.addWidget(self._btn_save_context)
+        return frame
+
+    def _build_goal_pane(self) -> QWidget:
+        frame, lay = self._make_pane("Cel", "#e5c07b")
+
+        self._lbl_status = QLabel("—", styleSheet=_LBL_VAL)
+        self._lbl_session = QLabel("—", styleSheet=_LBL_DIM)
+        status_row = QHBoxLayout()
+        for key, lbl in [("Status:", self._lbl_status), ("Sesja:", self._lbl_session)]:
+            k = QLabel(key, styleSheet=_LBL_KEY)
+            k.setFixedWidth(50)
+            status_row.addWidget(k)
+            status_row.addWidget(lbl)
+        status_row.addStretch()
+        lay.addLayout(status_row)
+
+        self._goal_edit = QPlainTextEdit()
+        self._goal_edit.setFont(_FONT_MONO)
+        self._goal_edit.setPlaceholderText("Co chcesz osiągnąć w tej sesji?")
+        self._goal_edit.setStyleSheet(
+            "QPlainTextEdit{background:#141414;color:#e5c07b;"
+            "border:none;padding:4px;}"
+        )
+        self._goal_edit.textChanged.connect(self._on_goal_changed)
+        lay.addWidget(self._goal_edit, stretch=1)
+
+        self._btn_save_goal = QPushButton("Zapisz cel")
+        self._btn_save_goal.setStyleSheet(_BTN_ACCENT)
+        self._btn_save_goal.setEnabled(False)
+        self._btn_save_goal.clicked.connect(self._on_save_goal)
+        lay.addWidget(self._btn_save_goal)
+        return frame
+
+    def _build_next_pane(self) -> QWidget:
+        frame, lay = self._make_pane("Zadania (Next)", "#98c379")
 
         self._next_editor = QPlainTextEdit()
         self._next_editor.setFont(_FONT_MONO)
         self._next_editor.setPlaceholderText("- [ ] Zadanie 1\n- [ ] Zadanie 2\n...")
+        self._next_editor.setStyleSheet(
+            "QPlainTextEdit{background:#141414;color:#cccccc;"
+            "border:none;padding:4px;}"
+        )
         self._next_editor.textChanged.connect(lambda: self._btn_save.setEnabled(True))
         lay.addWidget(self._next_editor, stretch=1)
 
         actions = QHBoxLayout()
-        actions.setSpacing(6)
-
-        self._btn_add_task = QPushButton("+ Dodaj zadanie")
+        self._btn_add_task = QPushButton("+ Dodaj")
         self._btn_add_task.setStyleSheet(_BTN_GREEN)
         self._btn_add_task.clicked.connect(self._on_add_task)
         self._btn_add_task.setEnabled(False)
         actions.addWidget(self._btn_add_task)
 
-        self._btn_archive = QPushButton("Oczyszczenie → ARCHIWUM.md")
+        self._btn_save = QPushButton("Zapisz")
+        self._btn_save.setStyleSheet(_BTN_ACCENT)
+        self._btn_save.setEnabled(False)
+        self._btn_save.clicked.connect(self._on_save_next)
+        actions.addWidget(self._btn_save)
+        actions.addStretch()
+        lay.addLayout(actions)
+        return frame
+
+    def _build_done_pane(self) -> QWidget:
+        frame, lay = self._make_pane("Wykonane (Done)", "#c678dd")
+
+        self._done_view = QPlainTextEdit()
+        self._done_view.setFont(_FONT_MONO)
+        self._done_view.setPlaceholderText("(ukończone zadania pojawią się tutaj)")
+        self._done_view.setStyleSheet(
+            "QPlainTextEdit{background:#141414;color:#a08ab0;"
+            "border:none;padding:4px;}"
+        )
+        self._done_view.textChanged.connect(lambda: self._btn_save_done.setEnabled(True))
+        lay.addWidget(self._done_view, stretch=1)
+
+        actions = QHBoxLayout()
+        self._btn_save_done = QPushButton("Zapisz Done")
+        self._btn_save_done.setStyleSheet(_BTN)
+        self._btn_save_done.setEnabled(False)
+        self._btn_save_done.clicked.connect(self._on_save_done)
+        actions.addWidget(self._btn_save_done)
+
+        self._btn_archive = QPushButton("→ ARCHIWUM.md")
         self._btn_archive.setStyleSheet(_BTN_WARN)
         self._btn_archive.clicked.connect(self._on_archive)
         self._btn_archive.setEnabled(False)
         actions.addWidget(self._btn_archive)
-
         actions.addStretch()
-        self._lbl_hint = QLabel("")
-        self._lbl_hint.setStyleSheet(_LBL_DIM)
-        self._lbl_hint.setFont(_FONT_SMALL)
-        actions.addWidget(self._lbl_hint)
         lay.addLayout(actions)
+        return frame
 
-        return w
+    def _on_toggle_ai(self) -> None:
+        visible = self._ai_panel.isVisible()
+        self._ai_panel.setVisible(not visible)
+        self._btn_toggle_ai.setText("Zwiń" if not visible else "Rozwiń")
 
     # ------------------------------------------------------------------ #
     # Publiczne API                                                         #
@@ -849,12 +923,15 @@ class ZadaniaPanel(QWidget):
         self._btn_reload.setEnabled(True)
         self._btn_add_task.setEnabled(True)
         self._btn_archive.setEnabled(self._is_dps)
+        self._btn_save_done.setEnabled(self._is_dps)
+        self._btn_oczyszczenie.setEnabled(self._is_dps)
 
-        # Przekaż kontekst do panelu AI
         self._ai_panel.set_plan_context(text)
 
         self._render()
         self._btn_save.setEnabled(False)
+        self._btn_save_context.setEnabled(False)
+        self._btn_save_goal.setEnabled(False)
         self._lbl_hint.setText(f"{'DPS' if self._is_dps else 'Zwykły MD'} · {path.name}")
 
     def _render(self) -> None:
@@ -878,32 +955,112 @@ class ZadaniaPanel(QWidget):
                 self._lbl_status.setText(status or "—")
                 self._lbl_status.setStyleSheet(_LBL_VAL)
 
-            self._lbl_goal.setText(meta.get("goal", "—") or "—")
             self._lbl_session.setText(
                 f"Sesja {meta.get('session', '—')} · {meta.get('updated', '—')}"
             )
 
-            cur_raw = _read_section(text, "current")
-            cur: dict[str, str] = {}
-            for line in cur_raw.splitlines():
-                if line.startswith("-") and ":" in line:
-                    k, _, v = line[1:].partition(":")
-                    cur[k.strip()] = v.strip()
-            self._lbl_cur_task.setText(cur.get("task", "") or "(brak aktywnego zadania)")
+            # Cel → panel goal
+            goal_text = meta.get("goal", "") or ""
+            self._goal_edit.blockSignals(True)
+            self._goal_edit.setPlainText(goal_text)
+            self._goal_edit.blockSignals(False)
 
+            # Kontekst → sekcja current (lub blockers — co jest)
+            cur_raw = _read_section(text, "current")
+            self._context_edit.blockSignals(True)
+            self._context_edit.setPlainText(cur_raw)
+            self._context_edit.blockSignals(False)
+
+            # Next → edytor zadań
             next_body = _read_section(text, "next")
             self._next_editor.blockSignals(True)
             self._next_editor.setPlainText(next_body)
             self._next_editor.blockSignals(False)
+
+            # Done → panel wykonane
+            done_body = _read_section(text, "done")
+            self._done_view.blockSignals(True)
+            self._done_view.setPlainText(done_body)
+            self._done_view.blockSignals(False)
         else:
             self._lbl_status.setText("(zwykły plik MD)")
             self._lbl_status.setStyleSheet(_LBL_DIM)
-            self._lbl_goal.setText(str(self._plan_path))
             self._lbl_session.setText("")
-            self._lbl_cur_task.setText("(brak sekcji DPS)")
+            self._goal_edit.blockSignals(True)
+            self._goal_edit.setPlainText(str(self._plan_path))
+            self._goal_edit.blockSignals(False)
+            self._context_edit.blockSignals(True)
+            self._context_edit.setPlainText(self._plan_text)
+            self._context_edit.blockSignals(False)
             self._next_editor.blockSignals(True)
-            self._next_editor.setPlainText(self._plan_text)
+            self._next_editor.setPlainText("")
             self._next_editor.blockSignals(False)
+            self._done_view.blockSignals(True)
+            self._done_view.setPlainText("")
+            self._done_view.blockSignals(False)
+
+    # -- Handlery zapisu poszczególnych okien --------------------------------
+
+    def _on_context_changed(self) -> None:
+        self._btn_save_context.setEnabled(True)
+
+    def _on_goal_changed(self) -> None:
+        self._btn_save_goal.setEnabled(True)
+
+    def _on_save_context(self) -> None:
+        if not self._plan_path or not self._is_dps:
+            return
+        new_body = self._context_edit.toPlainText()
+        new_text = _replace_section(self._plan_text, "current", new_body)
+        try:
+            self._plan_path.write_text(new_text, encoding="utf-8")
+        except OSError as e:
+            QMessageBox.critical(self, "Błąd zapisu", str(e))
+            return
+        self._plan_text = new_text
+        self._btn_save_context.setEnabled(False)
+        self._lbl_hint.setText(f"Zapisano kontekst · {self._plan_path.name}")
+
+    def _on_save_goal(self) -> None:
+        if not self._plan_path or not self._is_dps:
+            return
+        goal_text = self._goal_edit.toPlainText().strip()
+        meta_raw = _read_section(self._plan_text, "meta")
+        new_meta_lines = []
+        goal_written = False
+        for line in meta_raw.splitlines():
+            if line.startswith("-") and ":" in line:
+                k, _, _ = line[1:].partition(":")
+                if k.strip() == "goal":
+                    new_meta_lines.append(f"- goal: {goal_text}")
+                    goal_written = True
+                    continue
+            new_meta_lines.append(line)
+        if not goal_written:
+            new_meta_lines.append(f"- goal: {goal_text}")
+        new_text = _replace_section(self._plan_text, "meta", "\n".join(new_meta_lines))
+        try:
+            self._plan_path.write_text(new_text, encoding="utf-8")
+        except OSError as e:
+            QMessageBox.critical(self, "Błąd zapisu", str(e))
+            return
+        self._plan_text = new_text
+        self._btn_save_goal.setEnabled(False)
+        self._lbl_hint.setText(f"Zapisano cel · {self._plan_path.name}")
+
+    def _on_save_done(self) -> None:
+        if not self._plan_path or not self._is_dps:
+            return
+        new_body = self._done_view.toPlainText()
+        new_text = _replace_section(self._plan_text, "done", new_body)
+        try:
+            self._plan_path.write_text(new_text, encoding="utf-8")
+        except OSError as e:
+            QMessageBox.critical(self, "Błąd zapisu", str(e))
+            return
+        self._plan_text = new_text
+        self._btn_save_done.setEnabled(False)
+        self._lbl_hint.setText(f"Zapisano done · {self._plan_path.name}")
 
     def _on_save_next(self) -> None:
         if not self._plan_path:
@@ -920,7 +1077,7 @@ class ZadaniaPanel(QWidget):
             return
         self._plan_text = new_text
         self._btn_save.setEnabled(False)
-        self._lbl_hint.setText(f"Zapisano · {self._plan_path.name}")
+        self._lbl_hint.setText(f"Zapisano zadania · {self._plan_path.name}")
 
     def _on_add_task(self) -> None:
         text = self._next_editor.toPlainText()
@@ -934,37 +1091,74 @@ class ZadaniaPanel(QWidget):
     def _on_archive(self) -> None:
         if not self._plan_path or not self._is_dps:
             return
+
         done_body = _read_section(self._plan_text, "done")
         done_items = [l.strip() for l in done_body.splitlines() if l.strip()]
-        if not done_items:
-            QMessageBox.information(self, "Oczyszczenie", "Sekcja Done jest pusta.")
+
+        # Potwierdź operację
+        msg = (
+            f"Oczyszczenie PLAN.md:\n\n"
+            f"  • {len(done_items)} zadań z sekcji Done → ARCHIWUM.md\n"
+            f"  • Sekcja Done zostanie wyczyszczona\n"
+            f"  • Sekcja Current zostanie wyczyszczona\n"
+            f"  • Status zostanie ustawiony na: idle\n\n"
+            f"Kontynuować?"
+        )
+        if QMessageBox.question(
+            self, "Oczyszczenie", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
             return
 
-        archiwum_path = self._plan_path.parent / "ARCHIWUM.md"
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        try:
-            with archiwum_path.open("a", encoding="utf-8") as f:
-                f.write(f"\n## Archiwum {ts}\n" + "\n".join(done_items) + "\n")
-        except OSError as e:
-            QMessageBox.critical(self, "Błąd archiwizacji", str(e))
-            return
 
+        # Archiwizuj Done jeśli jest co archiwizować
+        if done_items:
+            archiwum_path = self._plan_path.parent / "ARCHIWUM.md"
+            try:
+                with archiwum_path.open("a", encoding="utf-8") as f:
+                    f.write(f"\n## Archiwum {ts}\n" + "\n".join(done_items) + "\n")
+            except OSError as e:
+                QMessageBox.critical(self, "Błąd archiwizacji", str(e))
+                return
+
+        # Wyczyść Done i Current
         new_text = _replace_section(self._plan_text, "done", "")
+        new_text = _replace_section(new_text, "current", "- task:\n- file:\n- started:")
+
+        # Zresetuj status i updated w meta
+        meta_raw = _read_section(new_text, "meta")
+        new_meta_lines = []
+        for line in meta_raw.splitlines():
+            if line.startswith("-") and ":" in line:
+                k, _, _ = line[1:].partition(":")
+                key = k.strip()
+                if key == "status":
+                    new_meta_lines.append("- status: idle")
+                    continue
+                if key == "updated":
+                    new_meta_lines.append(f"- updated: {ts}")
+                    continue
+            new_meta_lines.append(line)
+        new_text = _replace_section(new_text, "meta", "\n".join(new_meta_lines))
+
         try:
             self._plan_path.write_text(new_text, encoding="utf-8")
         except OSError as e:
             QMessageBox.critical(self, "Błąd zapisu", str(e))
             return
+
         self._plan_text = new_text
         self._render()
         self._btn_save.setEnabled(False)
+        archived_info = f"Zarchiwizowano {len(done_items)} zadań.\n" if done_items else "Sekcja Done była pusta.\n"
+        self._lbl_hint.setText(f"Oczyszczono · {self._plan_path.name}")
         QMessageBox.information(
-            self, "Oczyszczenie",
-            f"Zarchiwizowano {len(done_items)} zadań do:\n{archiwum_path}",
+            self, "Oczyszczenie zakończone",
+            f"{archived_info}Sekcje Done i Current wyczyszczone. Status: idle.",
         )
 
     def _on_ai_apply(self, ai_output: str) -> None:
-        """Wstawia wygenerowane przez AI zadania do edytora Next."""
         lines = []
         for line in ai_output.splitlines():
             stripped = line.strip()
@@ -974,7 +1168,6 @@ class ZadaniaPanel(QWidget):
                 lines.append(f"- [ ] {stripped[2:].strip()}")
 
         if not lines:
-            # Brak listy — wstaw cały output jako komentarz
             lines = [f"# {l}" for l in ai_output.strip().splitlines() if l.strip()]
 
         current = self._next_editor.toPlainText().rstrip()
@@ -982,3 +1175,4 @@ class ZadaniaPanel(QWidget):
         self._next_editor.setPlainText(new_content)
         self._btn_save.setEnabled(True)
         self._lbl_hint.setText("AI → wstawiono do Next (zapisz, żeby zachować)")
+        self._on_save_next()
