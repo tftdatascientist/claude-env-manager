@@ -1,0 +1,11 @@
+{"ts": "2026-04-26 01:42", "file": "CLAUDE.md", "section": "[key_files]", "action": "dodano", "preview": "- src/ — kod źródłowy - tests/ — testy pytest"}
+{"ts": "2026-04-26 01:42", "file": "CLAUDE.md", "section": "[project]", "action": "dodano", "preview": "- name: Zadanowiec - type: moduł projektów CC - client:  - stack: Python 3.13+"}
+{"ts": "2026-04-26 01:42", "file": "CLAUDE.md", "section": "[stack]", "action": "dodano", "preview": "- python: 3.13+ - pytest: 8.2+"}
+{"ts": "2026-04-26 01:42", "file": "ARCHITECTURE.md", "section": "[components]", "action": "dodano", "preview": "- NazwaKomponentu: opis co robi"}
+{"ts": "2026-04-26 01:42", "file": "ARCHITECTURE.md", "section": "[external_deps]", "action": "dodano", "preview": "- python: 3.13+"}
+{"ts": "2026-04-26 01:42", "file": "CONVENTIONS.md", "section": "[anti_patterns]", "action": "dodano", "preview": "- [ ] nie hardkoduj ścieżek absolutnych - [ ] nie pomijaj type hints - [ ] nie u"}
+{"ts": "2026-04-26 01:42", "file": "CONVENTIONS.md", "section": "[code_style]", "action": "dodano", "preview": "- PEP 8, type hints (Python 3.12+) - max line 120 znaków - pathlib.Path zamiast "}
+{"ts": "2026-04-26 01:42", "file": "CONVENTIONS.md", "section": "[commit_style]", "action": "dodano", "preview": "- feat/fix/docs/refactor/test/chore"}
+{"ts": "2026-04-26 01:42", "file": "CONVENTIONS.md", "section": "[file_layout]", "action": "dodano", "preview": "- src/ — kod źródłowy - tests/ — testy pytest - docs/ — dokumentacja (opcjonalni"}
+{"ts": "2026-04-26 01:42", "file": "CONVENTIONS.md", "section": "[naming]", "action": "dodano", "preview": "- snake_case dla plików i modułów Python - PascalCase dla klas - UPPER_CASE dla "}
+{"ts": "2026-04-26 01:42", "file": "CONVENTIONS.md", "section": "[testing]", "action": "dodano", "preview": "- pytest z tmp_path dla plików tymczasowych - brak hardkodowanych ścieżek w test"}

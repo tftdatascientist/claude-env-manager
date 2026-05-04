@@ -1,0 +1,16 @@
+{"ts": "2026-04-30 09:59", "file": "CLAUDE.md", "section": "[imports]", "action": "dodano", "preview": "@ARCHITECTURE.md @PLAN.md @CONVENTIONS.md"}
+{"ts": "2026-04-30 09:59", "file": "CLAUDE.md", "section": "[off_limits]", "action": "dodano", "preview": "- nie modyfikuj plików projektu CC z poziomu CM (tylko read-only poza spawnem in"}
+{"ts": "2026-04-30 09:59", "file": "CLAUDE.md", "section": "[project]", "action": "dodano", "preview": "- name: SSS Module dla Claude Manager - type: desktop - client: własny"}
+{"ts": "2026-04-30 09:59", "file": "CLAUDE.md", "section": "[specifics]", "action": "dodano", "preview": "- workflow: user wpisuje prompt + nazwę + lokalizację w CM, klik wysyła prompt d"}
+{"ts": "2026-04-30 09:59", "file": "CLAUDE.md", "section": "[stack]", "action": "dodano", "preview": "- Python 3.13 - PySide6 - VS Code wtyczka VS_CLAUDE - Claude Code CLI"}
+{"ts": "2026-04-30 09:59", "file": "ARCHITECTURE.md", "section": "[components]", "action": "dodano", "preview": "- IntakeView: PySide6 widget z polami prompt + nazwa + lokalizacja + przycisk St"}
+{"ts": "2026-04-30 09:59", "file": "ARCHITECTURE.md", "section": "[constraints]", "action": "dodano", "preview": "- Windows-first (ścieżki C:\\Users\\Sławek), ale kod ma pathlib bez hardkodu - nie"}
+{"ts": "2026-04-30 09:59", "file": "ARCHITECTURE.md", "section": "[data_flow]", "action": "dodano", "preview": "user wpisuje prompt → IntakeView → ProjectSpawner (mkdir, prompt → schowek/stdin"}
+{"ts": "2026-04-30 09:59", "file": "ARCHITECTURE.md", "section": "[decisions]", "action": "dodano", "preview": "- [x] SQLite zamiast pliku JSONL na logi | 2026-04-28 | filtry po session/round/"}
+{"ts": "2026-04-30 09:59", "file": "ARCHITECTURE.md", "section": "[overview]", "action": "dodano", "preview": "Moduł CM spawnuje projekt Claude Code w plan mode i monitoruje jego stan. UI (Py"}
+{"ts": "2026-04-30 09:59", "file": "CONVENTIONS.md", "section": "[anti_patterns]", "action": "dodano", "preview": "- nigdy nie modyfikuj plików .md projektu CC z poziomu CM (read-only po spawnie)"}
+{"ts": "2026-04-30 09:59", "file": "CONVENTIONS.md", "section": "[code_style]", "action": "dodano", "preview": "- type hints wszędzie (3.13) - pathlib.Path zamiast os.path - Qt sygnały zamiast"}
+{"ts": "2026-04-30 09:59", "file": "CONVENTIONS.md", "section": "[commit_style]", "action": "dodano", "preview": "- feat(sss): nowa funkcja - fix(sss): bug - refactor(sss): zmiana wewnętrzna - t"}
+{"ts": "2026-04-30 09:59", "file": "CONVENTIONS.md", "section": "[file_layout]", "action": "dodano", "preview": "- src/cm/sss_module/: cały moduł - src/cm/sss_module/views/: PySide6 widgets (in"}
+{"ts": "2026-04-30 09:59", "file": "CONVENTIONS.md", "section": "[naming]", "action": "dodano", "preview": "- snake_case dla plików i modułów - PascalCase dla klas Qt (View/Widget/Spawner/"}
+{"ts": "2026-04-30 09:59", "file": "CONVENTIONS.md", "section": "[testing]", "action": "dodano", "preview": "- pytest + pytest-qt do widgetów - tmp_path dla fake projektów - mock subprocess"}

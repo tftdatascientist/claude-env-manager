@@ -70,3 +70,84 @@ def test_save_decision(repo: RazdRepository) -> None:
         answer="Notatnik systemowy",
     )
     assert did > 0
+
+
+# --- Focus sessions ---
+
+def test_start_focus_session(repo: RazdRepository) -> None:
+    sid = repo.start_focus_session("2026-05-02T10:00:00", {"python.exe", "code.exe"})
+    assert sid > 0
+    sessions = repo.get_focus_sessions_for_day("2026-05-02")
+    assert len(sessions) == 1
+    assert sessions[0].id == sid
+    assert sessions[0].ended_at is None
+    assert sessions[0].score is None
+
+
+def test_end_focus_session(repo: RazdRepository) -> None:
+    sid = repo.start_focus_session("2026-05-02T10:00:00", {"python.exe"})
+    repo.end_focus_session(sid, "2026-05-02T10:30:00", 1800, 8)
+    sessions = repo.get_focus_sessions_for_day("2026-05-02")
+    assert sessions[0].ended_at == "2026-05-02T10:30:00"
+    assert sessions[0].duration_s == 1800
+    assert sessions[0].score == 8
+
+
+def test_focus_process_samples(repo: RazdRepository) -> None:
+    sid = repo.start_focus_session("2026-05-02T10:00:00", set())
+    repo.add_focus_process_sample(sid, "2026-05-02T10:00:02", "python.exe")
+    repo.add_focus_process_sample(sid, "2026-05-02T10:00:04", "chrome.exe")
+    samples = repo.get_focus_process_samples(sid)
+    assert len(samples) == 2
+    assert samples[0] == ("2026-05-02T10:00:02", "python.exe")
+    assert samples[1] == ("2026-05-02T10:00:04", "chrome.exe")
+
+
+def test_focus_sessions_day_filter(repo: RazdRepository) -> None:
+    repo.start_focus_session("2026-05-01T09:00:00", set())
+    repo.start_focus_session("2026-05-02T11:00:00", set())
+    assert len(repo.get_focus_sessions_for_day("2026-05-01")) == 1
+    assert len(repo.get_focus_sessions_for_day("2026-05-02")) == 1
+
+
+def test_whitelist_snapshot_stored_as_json(repo: RazdRepository) -> None:
+    sid = repo.start_focus_session("2026-05-02T10:00:00", {"a.exe", "b.exe"})
+    sessions = repo.get_focus_sessions_for_day("2026-05-02")
+    loaded = json.loads(sessions[0].whitelist_snapshot)
+    assert set(loaded) == {"a.exe", "b.exe"}
+
+
+# --- CC sessions ---
+
+def test_open_cc_session(repo: RazdRepository) -> None:
+    sid = repo.open_cc_session("C:\\projects\\razd", "2026-05-02T09:00:00")
+    assert sid > 0
+    sessions = repo.get_cc_sessions_for_day("2026-05-02")
+    assert len(sessions) == 1
+    assert sessions[0].project_path == "C:\\projects\\razd"
+    assert sessions[0].ended_at is None
+
+
+def test_close_cc_session(repo: RazdRepository) -> None:
+    sid = repo.open_cc_session("C:\\projects\\razd", "2026-05-02T09:00:00")
+    repo.close_cc_session(sid, "2026-05-02T09:30:00", 1800)
+    sessions = repo.get_cc_sessions_for_day("2026-05-02")
+    assert sessions[0].ended_at == "2026-05-02T09:30:00"
+    assert sessions[0].duration_s == 1800
+
+
+def test_add_cc_snapshot(repo: RazdRepository) -> None:
+    sid = repo.open_cc_session("C:\\projects\\razd", "2026-05-02T09:00:00")
+    repo.add_cc_snapshot(sid, "2026-05-02T09:00:02", 1234, "cc.exe")
+    repo.add_cc_snapshot(sid, "2026-05-02T09:00:04", 1234, "cc.exe")
+    # snapshot nie ma własnego get — weryfikujemy przez brak wyjątku i zamknięcie sesji
+    repo.close_cc_session(sid, "2026-05-02T09:00:10", 8)
+    sessions = repo.get_cc_sessions_for_day("2026-05-02")
+    assert sessions[0].duration_s == 8
+
+
+def test_cc_sessions_day_filter(repo: RazdRepository) -> None:
+    repo.open_cc_session("C:\\p\\a", "2026-05-01T10:00:00")
+    repo.open_cc_session("C:\\p\\b", "2026-05-02T11:00:00")
+    assert len(repo.get_cc_sessions_for_day("2026-05-01")) == 1
+    assert len(repo.get_cc_sessions_for_day("2026-05-02")) == 1

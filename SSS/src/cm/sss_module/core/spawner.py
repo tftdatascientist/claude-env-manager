@@ -26,7 +26,7 @@ class ProjectSpawner:
         cc_executable: str | None = None,
         vscode_executable: str | None = None,
     ) -> None:
-        self._cc = cc_executable or shutil.which("cc") or "cc"
+        self._cc = cc_executable or shutil.which("claude") or "claude"
         self._code = vscode_executable or shutil.which("code") or "code"
 
     def spawn(
@@ -67,16 +67,43 @@ class ProjectSpawner:
         self._launch_vscode(project_dir)
         return session_id, project_dir
 
+    def resume(self, project_dir: Path | str) -> tuple[str, Path]:
+        """Wznawia istniejący projekt CC przez --continue i otwiera VS Code.
+
+        Returns:
+            (session_id, project_dir)
+        """
+        project_dir = Path(project_dir)
+        if not project_dir.is_dir():
+            raise FileNotFoundError(f"Katalog projektu nie istnieje: {project_dir}")
+
+        session_id = _session_id(project_dir.name)
+        self._launch_cc_continue(project_dir)
+        self._launch_vscode(project_dir)
+        return session_id, project_dir
+
     def _launch_cc(self, prompt: str, project_dir: Path) -> None:
         try:
             subprocess.Popen(
-                [self._cc, "--plan", "--print", prompt],
+                [self._cc, "--permission-mode", "plan", "--print", prompt],
                 cwd=str(project_dir),
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
             logger.info("CC uruchomiony w plan mode: %s", project_dir)
         except FileNotFoundError:
-            logger.error("Nie znaleziono cc CLI: %s", self._cc)
+            logger.error("Nie znaleziono claude CLI: %s", self._cc)
+            raise
+
+    def _launch_cc_continue(self, project_dir: Path) -> None:
+        try:
+            subprocess.Popen(
+                [self._cc, "--continue", "--permission-mode", "plan"],
+                cwd=str(project_dir),
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+            logger.info("CC wznowiony (--continue) w plan mode: %s", project_dir)
+        except FileNotFoundError:
+            logger.error("Nie znaleziono claude CLI: %s", self._cc)
             raise
 
     def _launch_vscode(self, project_dir: Path) -> None:

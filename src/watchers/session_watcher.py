@@ -118,20 +118,83 @@ class SessionWatcher(QObject):
             delta = datetime.now(timezone.utc) - phase_changed_at
             seconds_since = max(0, int(delta.total_seconds()))
 
+        cost_usd = data.get("cost_usd")
+        transcript_path = data.get("transcript_path")
+
+        # Transkrypt jest źródłem prawdy dla model i ctx_pct.
+        # state.json używamy tylko jako fallback gdy brak transkryptu.
+        model: Optional[str] = None
+        ctx_pct: Optional[float] = None
+        if transcript_path:
+            model, ctx_pct = _read_metrics_from_transcript(transcript_path)
+        if model is None:
+            model = data.get("model")
+        if ctx_pct is None:
+            ctx_pct = data.get("ctx_pct")
+
         return TerminalSnapshot(
             slot_id=slot_id,
             phase=data.get("phase"),
             last_message=str(data.get("last_message", ""))[:500],
             last_message_at=_parse_iso(data.get("last_message_at")),
             phase_changed_at=phase_changed_at,
-            transcript_path=data.get("transcript_path"),
-            model=data.get("model"),
-            cost_usd=data.get("cost_usd"),
-            ctx_pct=data.get("ctx_pct"),
+            transcript_path=transcript_path,
+            model=model,
+            cost_usd=cost_usd,
+            ctx_pct=ctx_pct,
             session_id=data.get("session_id"),
             seconds_since_change=seconds_since,
             is_file_missing=False,
         )
+
+
+def _read_metrics_from_transcript(
+    transcript_path: str,
+) -> tuple[Optional[str], Optional[float]]:
+    """Czyta model i ctx_pct z ostatniego wpisu assistant w transkrypcie.
+
+    Fallback używany gdy state.json nie zawiera tych pól (statusline hook
+    nie zdążył jeszcze zapisać — np. zaraz po starcie sesji).
+
+    Returns:
+        (model, ctx_pct) — wartości lub None gdy niedostępne.
+    """
+    try:
+        p = Path(transcript_path)
+        if not p.exists():
+            return None, None
+        size = p.stat().st_size
+        buf_size = min(65536, size)  # ostatnie 64 KB wystarczą
+        with p.open("rb") as f:
+            f.seek(max(0, size - buf_size))
+            raw = f.read()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("type") != "assistant":
+                continue
+            msg = entry.get("message", {})
+            model: Optional[str] = msg.get("model") or None
+            usage = msg.get("usage", {})
+            ctx_pct: Optional[float] = None
+            if usage:
+                total = (
+                    usage.get("input_tokens", 0)
+                    + usage.get("cache_read_input_tokens", 0)
+                    + usage.get("cache_creation_input_tokens", 0)
+                )
+                if total > 0:
+                    ctx_pct = round(total / 200_000 * 100, 1)
+            return model, ctx_pct
+    except Exception:
+        return None, None
+    return None, None
 
 
 def read_transcript_tail(path: str, n_messages: int = 5) -> list[dict]:
@@ -240,6 +303,40 @@ def read_transcript_messages(
         return list(reversed(results))
     except OSError:
         return []
+
+
+def read_last_activity_ts(path: str) -> "datetime | None":
+    """Zwraca timestamp ostatniej wiadomości user/assistant w transkrypcie.
+
+    Czyta ostatnie 8 KB pliku — nie ładuje całego transkryptu.
+    Zwraca None gdy plik nie istnieje lub brak timestampów.
+    """
+    try:
+        p = Path(path)
+        if not p.exists():
+            return None
+        size = p.stat().st_size
+        buf_size = min(8192, size)
+        with p.open("rb") as f:
+            f.seek(max(0, size - buf_size))
+            raw = f.read()
+        for line in reversed(raw.decode("utf-8", errors="replace").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("type") not in ("user", "assistant"):
+                continue
+            raw_ts = entry.get("timestamp") or entry.get("message", {}).get("timestamp")
+            ts = _parse_iso(str(raw_ts)) if raw_ts else None
+            if ts:
+                return ts
+    except OSError:
+        pass
+    return None
 
 
 def _parse_iso(value: str | None) -> datetime | None:

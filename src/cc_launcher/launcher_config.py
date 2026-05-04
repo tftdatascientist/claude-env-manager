@@ -11,8 +11,13 @@ _CONFIG_PATH = Path.home() / ".claude" / "cc-panel" / "launcher_config.json"
 _USTAWIENIA_PATH = Path.home() / ".claude" / "cc-panel" / "ustawienia.json"
 
 CC_MODELS = [
+    # Claude 4.x — aktualne
+    "claude-sonnet-4-6",
+    "claude-opus-4-7",
+    "claude-haiku-4-5-20251001",
+    # Claude 4.x — poprzednie
     "claude-sonnet-4-5",
-    "claude-opus-4",
+    "claude-opus-4-5",
     "claude-haiku-4-5",
 ]
 CC_EFFORTS = ["high", "medium", "low"]
@@ -39,9 +44,10 @@ class SlotConfig:
     """
 
     project_path: str = ""
-    model: str = "claude-sonnet-4-5"
+    model: str = "claude-sonnet-4-6"
     effort: str = "high"
     permission_mode: str = "bypass (--dangerously-skip-permissions)"
+    pre_command: str = ""
     vibe_prompt: str = DEFAULT_VIBE_PROMPT
 
 
@@ -77,12 +83,13 @@ def load_launcher_config() -> LauncherConfig:
             for slot_raw in raw.get("slots", [])[:4]:
                 slots.append(SlotConfig(
                     project_path=slot_raw.get("project_path", ""),
-                    model=slot_raw.get("model", "claude-sonnet-4-5"),
+                    model=slot_raw.get("model", "claude-sonnet-4-6"),
                     effort=slot_raw.get("effort", "high"),
                     permission_mode=slot_raw.get(
                         "permission_mode",
                         "bypass (--dangerously-skip-permissions)",
                     ),
+                    pre_command=slot_raw.get("pre_command", ""),
                     vibe_prompt=slot_raw.get("vibe_prompt", DEFAULT_VIBE_PROMPT),
                 ))
                 if "terminal_count" in slot_raw:

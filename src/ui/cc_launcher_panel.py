@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -52,6 +54,7 @@ from src.cc_launcher.session_history import (
     SessionHistorySummary,
     find_latest_transcript,
     get_session_history,
+    list_project_transcripts,
 )
 from src.cc_launcher.session_manager import (
     open_vscode_window,
@@ -64,7 +67,7 @@ from src.projektant.template_parser import (
     read_section,
 )
 from src.utils.plan_parser import PlanData, get_section, read_plan, write_plan
-from src.ui.zadania_panel import ZadaniaPanel as _ZadaniaPanel
+from src.ui.prompt_score_panel import PromptScorePanel as _PromptScorePanel
 from src.workflow import WorkflowRunner
 
 # SSS Module — lazy import żeby nie blokować startu CM jeśli moduł nie istnieje
@@ -78,14 +81,31 @@ try:
     _SSS_AVAILABLE = True
 except ImportError:
     _SSS_AVAILABLE = False
+
+# SSM Monitor — lazy import
+try:
+    from src.ssm_module.views.ssm_tab import SsmTab as _SsmTab  # type: ignore
+    _SSM_AVAILABLE = True
+except ImportError:
+    _SsmTab = None  # type: ignore
+    _SSM_AVAILABLE = False
+
+# SSC Converter — lazy import (wymaga SSC/src w sys.path, ustawianego przez main_window)
+try:
+    from cm.ssc_module.views.ssc_view import SscView as _SscView  # type: ignore
+    _SSC_AVAILABLE = True
+except ImportError:
+    _SscView = None  # type: ignore
+    _SSC_AVAILABLE = False
 from src.watchers.session_watcher import (
     SessionWatcher,
     TerminalSnapshot,
+    read_last_activity_ts,
     read_transcript_messages,
     read_transcript_tail,
 )
 
-SLOT_COLORS = ["#2dd4bf", "#fbbf24", "#a78bfa", "#fb7185"]
+SLOT_COLORS = ["#2dd4bf", "#f97316", "#a78bfa", "#ef4444"]
 SLOT_NAMES = ["Projekt 1", "Projekt 2", "Projekt 3", "Projekt 4"]
 
 _FONT_MONO = QFont("Consolas", 9)
@@ -148,6 +168,17 @@ def _val(text: str = "—", style: str = _LBL_VAL) -> QLabel:
     lbl = QLabel(text, styleSheet=style)
     lbl.setFont(_FONT_SMALL)
     return lbl
+
+
+def _read_intake(project_path: str) -> dict | None:
+    """Zwraca intake.json jako dict gdy folder jest projektem SSS v2, inaczej None."""
+    try:
+        p = Path(project_path) / "intake.json"
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return None
 
 
 # ── Stałe dla konwersji DPS ──────────────────────────────────────────────────
@@ -441,6 +472,7 @@ class ProjectSlotWidget(QWidget):
     window_requested = Signal(int)
     stop_requested = Signal(int)
     stop_completed = Signal(int)
+    sss_detected = Signal(int, bool, str)   # slot_id, is_sss, project_name
 
     def __init__(self, slot_id: int, config: SlotConfig, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -450,6 +482,9 @@ class ProjectSlotWidget(QWidget):
         self._plan_data: PlanData | None = None
         self._stats: ProjectStats | None = None
         self._history: SessionHistorySummary | None = None
+        self._is_sss: bool = False
+        self._sss_name: str = ""
+        self._sesje_transcripts: list[tuple] = []
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -457,7 +492,13 @@ class ProjectSlotWidget(QWidget):
 
         self._stop_pending = False
         self._git_init_then_round_end = False
-        self._zadaniowiec_loaded = False
+        self._prompt_score_loaded = False
+        # SSS state — inicjalizowane tutaj jako bezpieczne defaults (SSS workflow nieaktywny)
+        self._sss_store = None
+        self._sss_spawner = None
+        self._sss_plan_watcher = None
+        self._sss_round_watcher = None
+        self._sss_active_session: str | None = None
         self._workflow = WorkflowRunner(parent=self)
         self._workflow.operation_done.connect(self._on_workflow_done)
 
@@ -505,12 +546,12 @@ class ProjectSlotWidget(QWidget):
         """)
         root.addWidget(self._tabs, stretch=1)
 
-        self._tabs.addTab(self._build_historia_sesje_vibe(), "Sesje")
-        self._tabs.addTab(self._build_dane(), "Dane")
-        self._tabs.addTab(self._build_plan(), "ZADANIA")
-        self._tabs.addTab(self._build_zadaniowiec(), "ZADANIOWIEC")
-        self._tabs.addTab(self._build_sss(), "SSS")
-        self._tabs.addTab(self._build_pcc(), "PLAN.md")
+        self._tabs.addTab(self._build_dane(), "Config")         # 0
+        self._tabs.addTab(self._build_ssm(), "Monitor")          # 1
+        self._tabs.addTab(self._build_historia_sesje_vibe(), "Historia")  # 2
+        self._tabs.addTab(self._build_plan(), "ZADANIA")         # 3
+        self._tabs.addTab(self._build_prompt_score(), "Prompt Score")  # 4
+        self._tabs.addTab(self._build_pcc(), "PLAN.md")          # 5
         self._tabs.addTab(self._build_md_file("CLAUDE.md"), "CLAUDE.md")
         self._tabs.addTab(self._build_md_file("ARCHITECTURE.md"), "ARCHITECTURE.md")
         self._tabs.addTab(self._build_md_file("CONVENTIONS.md"), "CONVENTIONS.md")
@@ -578,25 +619,7 @@ class ProjectSlotWidget(QWidget):
         kl.addStretch()
         grid.addWidget(konfig, 0, 0)
 
-        # ── (0,1) Stan aktywnej sesji ─────────────────────────────────
-        stan = QFrame()
-        stan.setStyleSheet(_CARD)
-        sl = QVBoxLayout(stan)
-        sl.setContentsMargins(8, 6, 8, 6)
-        sl.setSpacing(2)
-        sl.addWidget(QLabel("Stan aktywnej sesji", styleSheet=_LBL_HEAD))
-        self._lbl_phase = _val()
-        self._lbl_model_live = _val()
-        self._lbl_cost = _val()
-        self._lbl_ctx = _val()
-        sl.addLayout(_kv_row("Faza:", self._lbl_phase))
-        sl.addLayout(_kv_row("Model:", self._lbl_model_live))
-        sl.addLayout(_kv_row("Koszt:", self._lbl_cost))
-        sl.addLayout(_kv_row("Ctx%:", self._lbl_ctx))
-        sl.addStretch()
-        grid.addWidget(stan, 0, 1)
-
-        # ── (1,0) Statystyki projektu ─────────────────────────────────
+        # ── (0,1) Statystyki projektu ─────────────────────────────────
         stats = QFrame()
         stats.setStyleSheet(_CARD)
         stl = QVBoxLayout(stats)
@@ -622,9 +645,9 @@ class ProjectSlotWidget(QWidget):
         stl.addLayout(_kv_row("Remote:", self._lbl_git_url))
         stl.addLayout(_kv_row("Gałąź:", self._lbl_branch))
         stl.addStretch()
-        grid.addWidget(stats, 1, 0)
+        grid.addWidget(stats, 0, 1)
 
-        # ── (1,1) Kluczowe pliki projektu ─────────────────────────────
+        # ── (1,0-1) Kluczowe pliki projektu (cała szerokość) ──────────
         kfiles = QFrame()
         kfiles.setStyleSheet(_CARD)
         kfl = QVBoxLayout(kfiles)
@@ -638,9 +661,55 @@ class ProjectSlotWidget(QWidget):
             self._key_file_labels[fname] = lbl
             kfl.addLayout(_kv_row(fname + ":", lbl))
         kfl.addStretch()
-        grid.addWidget(kfiles, 1, 1)
+        grid.addWidget(kfiles, 1, 0, 1, 2)
 
-        outer.addLayout(grid, stretch=1)
+        outer.addLayout(grid, stretch=2)
+
+        # ── Separator ─────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("QFrame{color:#2a2a2a;}")
+        outer.addWidget(sep)
+
+        # ── Komenda przed CC (np. aktywacja venv) ─────────────────────
+        outer.addWidget(QLabel(
+            "Komenda przed CC (wykonywana w terminalu przed startem CC):",
+            styleSheet=_LBL_KEY,
+            wordWrap=True,
+        ))
+        self._pre_cmd_edit = QPlainTextEdit()
+        self._pre_cmd_edit.setFixedHeight(44)
+        self._pre_cmd_edit.setFont(_FONT_MONO)
+        self._pre_cmd_edit.setPlaceholderText(
+            "np. Set-ExecutionPolicy RemoteSigned -Scope Process; & \".venv\\Scripts\\Activate.ps1\""
+        )
+        outer.addWidget(self._pre_cmd_edit)
+
+        # ── Prompt wklejany do terminala CC ───────────────────────────
+        outer.addWidget(QLabel(
+            "Prompt wklejany do terminala CC przy uruchomieniu sesji:",
+            styleSheet=_LBL_KEY,
+            wordWrap=True,
+        ))
+        self._vibe_edit = QPlainTextEdit()
+        self._vibe_edit.setFont(_FONT_MONO)
+        self._vibe_edit.setPlaceholderText(DEFAULT_VIBE_PROMPT)
+        outer.addWidget(self._vibe_edit, stretch=1)
+
+        btns_vibe = QHBoxLayout()
+        btn_reset = QPushButton("Resetuj do domyślnego")
+        btn_reset.setStyleSheet(_BTN)
+        btn_reset.clicked.connect(lambda: self._vibe_edit.setPlainText(DEFAULT_VIBE_PROMPT))
+        btn_copy = QPushButton("Kopiuj do schowka")
+        btn_copy.setStyleSheet(_BTN)
+        btn_copy.clicked.connect(
+            lambda: QApplication.clipboard().setText(self._vibe_edit.toPlainText())
+        )
+        btns_vibe.addWidget(btn_reset)
+        btns_vibe.addWidget(btn_copy)
+        btns_vibe.addStretch()
+        outer.addLayout(btns_vibe)
+
         return w
 
     # ---- PLAN ---------------------------------------------------------- #
@@ -689,47 +758,60 @@ class ProjectSlotWidget(QWidget):
         lay.addWidget(splitter, stretch=1)
         return w
 
-    # ---- ZADANIOWIEC --------------------------------------------------- #
+    # ---- PROMPT SCORE -------------------------------------------------- #
 
-    def _build_zadaniowiec(self) -> QWidget:
-        """Osadzony ZadaniaPanel — ładuje projekt slotu automatycznie."""
-        self._zadaniowiec = _ZadaniaPanel()
-        return self._zadaniowiec
+    def _build_prompt_score(self) -> QWidget:
+        """Osadzony PromptScorePanel — wyświetla PS.md projektu SSS."""
+        self._prompt_score = _PromptScorePanel()
+        return self._prompt_score
 
-    # ---- SSS ----------------------------------------------------------- #
+    # ---- Monitor (Stan sesji + SSS Monitor) ---------------------------- #
 
-    def _build_sss(self) -> QWidget:
-        if not _SSS_AVAILABLE:
-            w = QWidget()
-            lay = QVBoxLayout(w)
-            lay.addWidget(QLabel("Moduł SSS niedostępny (błąd importu)."))
-            return w
-
-        db_path = Path.home() / ".claude" / "sss_events.db"
-        self._sss_store = _SSSLogStore(db_path)
-        self._sss_spawner = _SSSSpawner()
-        self._sss_plan_watcher: "_SSSPlanWatcher | None" = None
-        self._sss_round_watcher: "_SSSRoundWatcher | None" = None
-        self._sss_active_session: str | None = None
-
+    def _build_monitor(self) -> QWidget:
         w = QWidget()
-        root = QVBoxLayout(w)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        # ── Stan aktywnej sesji ────────────────────────────────────────
+        stan = QFrame()
+        stan.setStyleSheet(_CARD)
+        sl = QHBoxLayout(stan)
+        sl.setContentsMargins(10, 6, 10, 6)
+        sl.setSpacing(24)
+        sl.addWidget(QLabel("Stan aktywnej sesji", styleSheet=_LBL_HEAD))
+        sl.addWidget(QLabel("·", styleSheet=_LBL_DIM))
+        self._lbl_phase = _val()
+        self._lbl_model_live = _val()
+        self._lbl_cost = _val()
+        self._lbl_ctx = _val()
+        for label, widget in (
+            ("Faza:", self._lbl_phase),
+            ("Model:", self._lbl_model_live),
+            ("Koszt:", self._lbl_cost),
+            ("Ctx%:", self._lbl_ctx),
+        ):
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            lbl_k = QLabel(label, styleSheet=_LBL_KEY)
+            row.addWidget(lbl_k)
+            row.addWidget(widget)
+            sl.addLayout(row)
+        sl.addStretch()
+        lay.addWidget(stan)
 
-        self._sss_intake = _SSSIntakeView()
-        self._sss_intake.qt_start_clicked.connect(self._on_sss_start)
-        splitter.addWidget(self._sss_intake)
-
-        self._sss_logs = _SSSLogsView(self._sss_store)
-        self._sss_logs.refresh_sessions()
-        splitter.addWidget(self._sss_logs)
-        splitter.setSizes([280, 320])
-
-        root.addWidget(splitter)
+        # ── SSS Monitor (SsmTab) ───────────────────────────────────────
+        if not _SSM_AVAILABLE or _SsmTab is None:
+            lbl = QLabel("Moduł SSM (Monitor) niedostępny.")
+            lbl.setStyleSheet("color:#5c6370;font-size:11px;")
+            lay.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+        else:
+            self._ssm_widget = _SsmTab()
+            lay.addWidget(self._ssm_widget, stretch=1)
         return w
+
+    def _build_ssm(self) -> QWidget:
+        return self._build_monitor()
 
     def _sss_start_watchers(self, project_dir: Path, session_id: str) -> None:
         if not _SSS_AVAILABLE:
@@ -773,6 +855,18 @@ class ProjectSlotWidget(QWidget):
             self._sss_start_watchers(project_dir, session_id)
         except Exception as exc:
             QMessageBox.critical(self, "SSS — błąd startu", str(exc))
+
+    def _on_sss_resume(self, project_dir_str: str) -> None:
+        try:
+            project_dir = Path(project_dir_str)
+            session_id, project_dir = self._sss_spawner.resume(project_dir)
+            self._sss_store.insert_event(session_id, "resume", payload={
+                "project_dir": str(project_dir),
+            })
+            self._sss_logs.refresh_sessions()
+            self._sss_start_watchers(project_dir, session_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "SSS — błąd wznowienia", str(exc))
 
     def _on_sss_plan_changed(self, sections: dict) -> None:
         if not self._sss_active_session:
@@ -1823,17 +1917,44 @@ class ProjectSlotWidget(QWidget):
         toolbar.addWidget(self._btn_sesje_refresh)
         lay.addLayout(toolbar)
 
-        # Widok konwersacji
+        # Splitter: lista sesji (lewa) | widok konwersacji (prawa)
+        h_split = QSplitter(Qt.Orientation.Horizontal)
+
+        # ── Lewa: lista sesji ──────────────────────────────────────────
+        self._sesje_list = QListWidget()
+        self._sesje_list.setMaximumWidth(190)
+        self._sesje_list.setMinimumWidth(120)
+        self._sesje_list.setFont(_FONT_SMALL)
+        self._sesje_list.setStyleSheet(
+            "QListWidget{"
+            "background:#111111;border:none;"
+            "border-right:1px solid #2a2a2a;"
+            "}"
+            "QListWidget::item{"
+            "padding:5px 8px;"
+            "color:#aaaaaa;"
+            "border-bottom:1px solid #1e1e1e;"
+            "}"
+            "QListWidget::item:selected{"
+            "background:#1e3a5f;color:#ffffff;"
+            "}"
+            "QListWidget::item:hover:!selected{"
+            "background:#1a1a1a;"
+            "}"
+        )
+        self._sesje_list.currentRowChanged.connect(self._on_sesje_selected)
+        h_split.addWidget(self._sesje_list)
+
+        # ── Prawa: widok konwersacji ───────────────────────────────────
         self._sesje_view = QTextEdit()
         self._sesje_view.setReadOnly(True)
         self._sesje_view.setFont(_FONT_MONO)
         self._sesje_view.setStyleSheet(
-            "QTextEdit{"
-            "background:#0d0d0d;color:#cccccc;"
-            "border:none;padding:8px;"
-            "}"
+            "QTextEdit{background:#0d0d0d;color:#cccccc;border:none;padding:8px;}"
         )
-        lay.addWidget(self._sesje_view, stretch=1)
+        h_split.addWidget(self._sesje_view)
+        h_split.setSizes([160, 600])
+        lay.addWidget(h_split, stretch=1)
 
         # Stopka ze statystykami
         footer = QFrame()
@@ -1851,34 +1972,64 @@ class ProjectSlotWidget(QWidget):
         return w
 
     def _reload_sesje_view(self) -> None:
-        """Wczytuje i renderuje konwersację z najnowszego transkryptu projektu."""
+        """Wczytuje listę wszystkich transkryptów projektu; ładuje najnowszy."""
         project_path = self._path_edit.toPlainText().strip()
+        self._sesje_list.blockSignals(True)
+        self._sesje_list.clear()
+        self._sesje_transcripts = []
+
         if not project_path:
+            self._sesje_list.blockSignals(False)
             self._sesje_view.setHtml(
                 "<p style='color:#5c6370;margin:16px;'>Brak ścieżki projektu.</p>"
             )
             self._lbl_sesje_path.setText("")
+            self._lbl_cc_sessions.setText("")
+            self._lbl_cc_last.setText("")
             return
 
-        transcript_path = find_latest_transcript(project_path)
-        if transcript_path is None:
+        entries = list_project_transcripts(project_path)
+        self._sesje_transcripts = entries
+
+        for path, mtime, size in entries:
+            dt = datetime.fromtimestamp(mtime)
+            label = dt.strftime("%Y-%m-%d\n%H:%M:%S")
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            kb = size // 1024
+            item.setToolTip(f"{path.name}\n{kb} KB")
+            self._sesje_list.addItem(item)
+
+        count = len(entries)
+        self._lbl_cc_sessions.setText(f"{count} sesji CC")
+        self._sesje_list.blockSignals(False)
+
+        if entries:
+            self._sesje_list.setCurrentRow(0)
+        else:
             self._sesje_view.setHtml(
                 "<p style='color:#5c6370;margin:16px;'>"
                 "Brak transkryptów w ~/.claude/projects/ dla tego projektu.</p>"
             )
             self._lbl_sesje_path.setText("(brak transkryptów)")
+            self._lbl_cc_last.setText("")
+
+    def _on_sesje_selected(self, row: int) -> None:
+        """Ładuje wybrany transkrypt do widoku konwersacji."""
+        if row < 0 or row >= len(self._sesje_transcripts):
             return
-
-        self._lbl_sesje_path.setText(str(transcript_path))
-        messages = read_transcript_messages(transcript_path)
-
+        path, mtime, _ = self._sesje_transcripts[row]
+        self._lbl_sesje_path.setText(path.name)
+        self._lbl_cc_last.setText(datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"))
+        messages = read_transcript_messages(path)
         if not messages:
             self._sesje_view.setHtml(
                 "<p style='color:#5c6370;margin:16px;'>Brak wiadomości w transkrypcie.</p>"
             )
             return
-
         self._sesje_view.setHtml(_render_conversation_html(messages))
+        # Przewiń do końca (najnowsze wiadomości)
+        self._sesje_view.moveCursor(QTextCursor.MoveOperation.End)
 
     # ---- Vibe Code ----------------------------------------------------- #
 
@@ -1913,26 +2064,34 @@ class ProjectSlotWidget(QWidget):
         lay.addLayout(btns)
         return w
 
-    # ---- Historia + Sesje + Vibe Code (połączona zakładka) ------------ #
+    # ---- Historia (dawna zakładka Sesje) ------------------------------- #
 
     def _build_historia_sesje_vibe(self) -> QWidget:
+        # Tworzymy _transcript jako ukryty widget — nadal używany przez _last_msg
+        self._transcript = QPlainTextEdit()
+        self._transcript.setReadOnly(True)
+        self._transcript.setFont(_FONT_MONO)
+        self._last_msg = self._transcript
+
         w = QWidget()
         outer = QVBoxLayout(w)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(self._build_historia())
-        splitter.addWidget(self._build_sesje())
-        splitter.addWidget(self._build_vibe())
-        splitter.setSizes([200, 220, 160])
-        outer.addWidget(splitter)
+        outer.addWidget(self._build_sesje())
         return w
 
-    # ---- Full Converter ------------------------------------------------ #
+    # ---- Full Converter (SSC) ------------------------------------------ #
 
     def _build_full_converter(self) -> QWidget:
-        self._full_converter = _FullConverterPanel()
-        return self._full_converter
+        if not _SSC_AVAILABLE or _SscView is None:
+            w = QWidget()
+            lay = QVBoxLayout(w)
+            lbl = QLabel("Moduł SSC (Converter) niedostępny.")
+            lbl.setStyleSheet("color:#5c6370;font-size:11px;")
+            lay.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+            return w
+        self._ssc_widget = _SscView()
+        return self._ssc_widget
 
     # ---- Pasek akcji --------------------------------------------------- #
 
@@ -1980,7 +2139,7 @@ class ProjectSlotWidget(QWidget):
     # Sygnały                                                               #
     # ------------------------------------------------------------------ #
 
-    _TAB_ZADANIOWIEC = 3  # indeks zakładki ZADANIOWIEC w self._tabs
+    _TAB_PROMPT_SCORE = 4  # indeks zakładki Prompt Score w self._tabs
 
     def _connect_signals(self) -> None:
         self._btn_launch.clicked.connect(lambda: self.launch_requested.emit(self._slot_id))
@@ -1991,7 +2150,6 @@ class ProjectSlotWidget(QWidget):
         self._btn_browse.clicked.connect(self._on_browse)
         self._btn_plan_refresh.clicked.connect(self.reload_plan)
         self._btn_plan_save.clicked.connect(self._on_plan_save)
-        self._btn_hist_refresh.clicked.connect(self._refresh_transcript)
         self._btn_stats_refresh.clicked.connect(self.reload_stats)
         self._btn_sesje_refresh.clicked.connect(self._reload_sesje_view)
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -2007,9 +2165,9 @@ class ProjectSlotWidget(QWidget):
         self._plan_editor.textChanged.connect(lambda: self._btn_plan_save.setEnabled(True))
 
     def _on_tab_changed(self, index: int) -> None:
-        if index == self._TAB_ZADANIOWIEC and not self._zadaniowiec_loaded:
-            self._zadaniowiec_loaded = True
-            self.reload_zadaniowiec()
+        if index == self._TAB_PROMPT_SCORE and not self._prompt_score_loaded:
+            self._prompt_score_loaded = True
+            self.reload_prompt_score()
 
     # ------------------------------------------------------------------ #
     # Publiczne API                                                         #
@@ -2031,6 +2189,7 @@ class ProjectSlotWidget(QWidget):
             model=self._model_combo.currentText(),
             effort=self._effort_combo.currentText(),
             permission_mode=self._perm_combo.currentText(),
+            pre_command=self._pre_cmd_edit.toPlainText().strip(),
             vibe_prompt=self._vibe_edit.toPlainText() or DEFAULT_VIBE_PROMPT,
         )
 
@@ -2044,10 +2203,10 @@ class ProjectSlotWidget(QWidget):
         self._lbl_plan_path.setText(str(Path(path) / "PLAN.md"))
         self._render_plan()
 
-    def reload_zadaniowiec(self) -> None:
+    def reload_prompt_score(self) -> None:
         path = self._path_edit.toPlainText().strip()
         if path:
-            self._zadaniowiec.load_from_project(path, silent=True)
+            self._prompt_score.load_from_project(path, silent=True)
 
     def reload_pcc(self) -> None:
         path = self._path_edit.toPlainText().strip()
@@ -2150,6 +2309,7 @@ class ProjectSlotWidget(QWidget):
             self._model_combo.currentIndexChanged,
             self._effort_combo.currentIndexChanged,
             self._perm_combo.currentIndexChanged,
+            self._pre_cmd_edit.textChanged,
             self._vibe_edit.textChanged,
         ):
             sig.disconnect(self._on_config_changed)
@@ -2161,6 +2321,7 @@ class ProjectSlotWidget(QWidget):
         self._effort_combo.setCurrentIndex(max(0, idx))
         idx = self._perm_combo.findText(self._config.permission_mode)
         self._perm_combo.setCurrentIndex(max(0, idx))
+        self._pre_cmd_edit.setPlainText(self._config.pre_command)
         self._vibe_edit.setPlainText(self._config.vibe_prompt)
 
         for sig in (
@@ -2168,6 +2329,7 @@ class ProjectSlotWidget(QWidget):
             self._model_combo.currentIndexChanged,
             self._effort_combo.currentIndexChanged,
             self._perm_combo.currentIndexChanged,
+            self._pre_cmd_edit.textChanged,
             self._vibe_edit.textChanged,
         ):
             sig.connect(self._on_config_changed)
@@ -2196,22 +2358,32 @@ class ProjectSlotWidget(QWidget):
                 self.reload_stats()
         self.config_changed.emit()
 
+    def _notify_sss(self, path: str) -> None:
+        """Wykrywa projekt SSS v2 na podstawie intake.json i emituje sss_detected."""
+        intake = _read_intake(path) if path else None
+        is_sss = intake is not None
+        name = (intake.get("project_name") or "") if intake else ""
+        self._is_sss = is_sss
+        self._sss_name = name
+        self.sss_detected.emit(self._slot_id, is_sss, name)
+
     def _on_browse(self) -> None:
         folder = QFileDialog.getExistingDirectory(
             self, "Wybierz katalog projektu",
             self._path_edit.toPlainText().strip() or str(Path.home()),
         )
         if folder:
-            self._zadaniowiec_loaded = False
+            self._prompt_score_loaded = False
             self._path_edit.setPlainText(folder)
             self.reload_plan()
             self.reload_pcc()
             self.reload_stats()
             self.reload_history()
             self.reload_md_files()
-            if self._tabs.currentIndex() == self._TAB_ZADANIOWIEC:
-                self._zadaniowiec_loaded = True
-                self.reload_zadaniowiec()
+            if self._tabs.currentIndex() == self._TAB_PROMPT_SCORE:
+                self._prompt_score_loaded = True
+                self.reload_prompt_score()
+            self._notify_sss(folder)
 
     def _on_plan_save(self) -> None:
         path = self._path_edit.toPlainText().strip()
@@ -2277,17 +2449,6 @@ class ProjectSlotWidget(QWidget):
                 lbl.setStyleSheet(_LBL_DIM)
 
     def _render_history(self) -> None:
-        h = self._history
-        if not h:
-            return
-        count_txt = f"{h.transcript_count} sesji CC" if h.transcript_count else "0 sesji CC"
-        self._lbl_cc_sessions.setText(count_txt)
-        if h.transcript_last_at:
-            self._lbl_cc_last.setText(
-                "ostatnia: " + h.transcript_last_at.strftime("%Y-%m-%d %H:%M")
-            )
-        else:
-            self._lbl_cc_last.setText("")
         self._reload_sesje_view()
 
 
@@ -3095,7 +3256,11 @@ class _ColoredSlotTabBar(QTabBar):
     wiersz 1: Projekt N
     wiersz 2: nazwa folderu
     wiersz 3: ikona + status + czas  (kolor zależny od fazy sesji)
+
+    Dwukrotne kliknięcie prawym klawiszem na zakładce emituje folder_change_requested(index).
     """
+
+    folder_change_requested = Signal(int)
 
     def __init__(self, colors: list[str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3109,6 +3274,8 @@ class _ColoredSlotTabBar(QTabBar):
             ("", _STATUS_COLOR_OFFLINE),
         ]
         self._hover_index = -1
+        self._sss_flags: list[bool] = [False, False, False, False]
+        self._sss_plan_texts: list[str] = ["", "", "", ""]
         self.setMouseTracking(True)
         self.setExpanding(False)
         self.setDrawBase(False)
@@ -3116,6 +3283,16 @@ class _ColoredSlotTabBar(QTabBar):
     def setSubLabel(self, index: int, text: str) -> None:
         if 0 <= index < len(self._sub_labels):
             self._sub_labels[index] = text or ""
+            self.update()
+
+    def setSssFlag(self, index: int, is_sss: bool) -> None:
+        if 0 <= index < 4:
+            self._sss_flags[index] = is_sss
+            self.update()
+
+    def setSssPlanText(self, index: int, text: str) -> None:
+        if 0 <= index < 4:
+            self._sss_plan_texts[index] = text
             self.update()
 
     def setStatusLabel(self, index: int, phase: str | None, elapsed: str, is_missing: bool) -> None:
@@ -3157,85 +3334,133 @@ class _ColoredSlotTabBar(QTabBar):
             self._hover_index = -1
             self.update()
 
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.RightButton:
+            try:
+                point = event.position().toPoint()
+            except AttributeError:
+                point = event.pos()
+            idx = self.tabAt(point)
+            if idx >= 0:
+                self.folder_change_requested.emit(idx)
+            return
+        super().mousePressEvent(event)
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        h3 = None  # wysokość jednej trzeciej, ustalana per zakładka
+
         for i in range(self.count()):
             color = self._colors[i] if i < len(self._colors) else QColor("#888888")
             rect = self.tabRect(i)
             is_selected = (i == self.currentIndex())
             is_hover = (i == self._hover_index)
 
-            # Tło zakładki
-            bg = QColor(color)
+            # ── Tło karty ─────────────────────────────────────────────────
             if is_selected:
-                pass
+                bg = QColor("#242424")
             elif is_hover:
-                bg.setAlpha(150)
+                bg = QColor("#1e1e1e")
             else:
-                bg.setAlpha(70)
+                bg = QColor("#181818")
             painter.fillRect(rect, bg)
 
-            if is_selected:
-                indicator = QRect(rect.x(), rect.bottom() - 3, rect.width(), 3)
-                painter.fillRect(indicator, color.lighter(135))
+            # ── Lewy pasek akcentu (4 px) ─────────────────────────────────
+            accent = QColor(color)
+            if not is_selected:
+                accent.setAlpha(130)
+            painter.fillRect(QRect(rect.x(), rect.y(), 4, rect.height()), accent)
 
-            main_text = self.tabText(i) or ""
+            # ── Dolna linia dla wybranej zakładki ─────────────────────────
+            if is_selected:
+                painter.fillRect(
+                    QRect(rect.x(), rect.bottom() - 2, rect.width(), 2),
+                    QColor(color),
+                )
+
+            # ── Dane ──────────────────────────────────────────────────────
             sub_text = self._sub_labels[i] if i < len(self._sub_labels) else ""
             status_text, status_color = (
                 self._status_labels[i] if i < len(self._status_labels)
                 else ("", _STATUS_COLOR_OFFLINE)
             )
+            is_sss = self._sss_flags[i] if i < len(self._sss_flags) else False
+            sss_plan_text = self._sss_plan_texts[i] if i < len(self._sss_plan_texts) else ""
 
             h = rect.height()
-            row_h = h // 3
+            cx = rect.x() + 8       # x startu tekstu (po pasku 4px + padding 4px)
+            cw = rect.width() - 12  # szerokość obszaru tekstu
 
-            # Wiersz 1: nazwa projektu (Projekt N)
-            r1 = QRect(rect.x() + 4, rect.y() + 2, rect.width() - 8, row_h)
-            font_main = QFont("Segoe UI", 11)
-            font_main.setBold(True)
-            painter.setFont(font_main)
-            painter.setPen(QColor("#000000") if is_selected else color.lighter(170))
-            painter.drawText(r1, Qt.AlignmentFlag.AlignCenter, main_text)
+            # ── Mała flaga z numerem slotu (top-right) ────────────────────
+            flag_w, flag_h = 18, 14
+            flag_rect = QRect(rect.right() - flag_w - 3, rect.y() + 4, flag_w, flag_h)
+            flag_bg = QColor(color)
+            flag_bg.setAlpha(200 if is_selected else 110)
+            painter.fillRect(flag_rect, flag_bg)
+            ff = QFont("Segoe UI", 7)
+            ff.setBold(True)
+            painter.setFont(ff)
+            painter.setPen(QColor("#000000") if is_selected else QColor(color).lighter(160))
+            painter.drawText(flag_rect, Qt.AlignmentFlag.AlignCenter, str(i + 1))
 
-            # Wiersz 2: nazwa folderu
-            r2 = QRect(rect.x() + 4, rect.y() + row_h + 1, rect.width() - 8, row_h)
-            font_sub = QFont("Segoe UI", 9)
-            painter.setFont(font_sub)
-            painter.setPen(QColor("#1a1a1a") if is_selected else color)
+            # ── Badge SSS (obok flagi) ────────────────────────────────────
+            if is_sss:
+                sss_rect = QRect(rect.right() - flag_w - 34, rect.y() + 4, 28, flag_h)
+                painter.fillRect(sss_rect, QColor("#7c3aed"))
+                fb = QFont("Segoe UI", 7)
+                fb.setBold(True)
+                painter.setFont(fb)
+                painter.setPen(QColor("#ffffff"))
+                painter.drawText(sss_rect, Qt.AlignmentFlag.AlignCenter, "SSS")
+
+            # ── Nazwa projektu (duża, zajmuje górne ~2/3) ─────────────────
+            name_area_h = h - 22  # zostaw 22px na status
+            name_rect = QRect(cx, rect.y() + 4, cw - flag_w - 6, name_area_h - 4)
+            fn = QFont("Segoe UI", 12)
+            fn.setBold(True)
+            painter.setFont(fn)
+            name_color = QColor(color) if is_selected else QColor(color).darker(115)
+            painter.setPen(name_color)
             if sub_text:
                 metrics = painter.fontMetrics()
-                elided = metrics.elidedText(sub_text, Qt.TextElideMode.ElideMiddle, rect.width() - 12)
-                painter.drawText(r2, Qt.AlignmentFlag.AlignCenter, elided)
+                elided = metrics.elidedText(sub_text, Qt.TextElideMode.ElideMiddle, cw - flag_w - 8)
+                painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
+            else:
+                painter.setPen(QColor("#2e2e2e"))
+                painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "—")
 
-            # Wiersz 3: status sesji (ikona + faza + czas)
-            r3 = QRect(rect.x() + 4, rect.y() + row_h * 2 + 1, rect.width() - 8, row_h - 2)
-            # Pasek tła statusu
-            status_bg = QColor(status_color)
-            status_bg.setAlpha(50 if not is_selected else 80)
-            painter.fillRect(r3, status_bg)
-            font_st = QFont("Segoe UI", 8)
-            painter.setFont(font_st)
-            painter.setPen(QColor("#000000"))
-            if status_text:
+            # ── Status CC lub PLAN.md SSS (dolny pasek 20px) ─────────────
+            r3 = QRect(cx, rect.bottom() - 20, cw, 18)
+            cc_offline = not status_text or "brak sesji" in status_text
+
+            if is_sss and sss_plan_text and cc_offline:
+                plan_bg = QColor("#4c1d95")
+                plan_bg.setAlpha(80 if is_selected else 50)
+                painter.fillRect(QRect(rect.x() + 4, r3.y(), rect.width() - 4, r3.height()), plan_bg)
+                fs = QFont("Segoe UI", 8)
+                painter.setFont(fs)
+                painter.setPen(QColor("#c4b5fd"))
                 metrics = painter.fontMetrics()
-                elided = metrics.elidedText(status_text, Qt.TextElideMode.ElideRight, rect.width() - 10)
-                painter.drawText(r3, Qt.AlignmentFlag.AlignCenter, elided)
+                elided = metrics.elidedText(sss_plan_text, Qt.TextElideMode.ElideRight, cw)
+                painter.drawText(r3, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, elided)
+            else:
+                fs = QFont("Segoe UI", 8)
+                painter.setFont(fs)
+                if cc_offline:
+                    painter.setPen(QColor("#333333"))
+                elif "working" in status_text:
+                    painter.setPen(QColor(_STATUS_COLOR_WORKING))
+                else:
+                    painter.setPen(QColor(_STATUS_COLOR_WAITING))
+                if status_text:
+                    metrics = painter.fontMetrics()
+                    elided = metrics.elidedText(status_text, Qt.TextElideMode.ElideRight, cw)
+                    painter.drawText(r3, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, elided)
 
 
 def _render_conversation_html(messages: list[dict]) -> str:
-    """Renderuje listę wiadomości {type, text, ts} jako HTML do QTextEdit."""
+    """Renderuje listę wiadomości {type, text} jako HTML do QTextEdit."""
     import html as _html
-
-    def _ts(msg: dict) -> str:
-        ts = msg.get("ts")
-        if ts is None:
-            return ""
-        try:
-            return ts.strftime("%H:%M")
-        except Exception:
-            return ""
 
     parts = [
         "<html><body style='background:#0d0d0d;margin:0;padding:0;"
@@ -3244,7 +3469,6 @@ def _render_conversation_html(messages: list[dict]) -> str:
     for msg in messages:
         role = msg.get("type", "")
         text = _html.escape(msg.get("text", "").strip())
-        ts_str = _ts(msg)
         text = text.replace("\n", "<br>")
 
         if role == "user":
@@ -3255,10 +3479,7 @@ def _render_conversation_html(messages: list[dict]) -> str:
                 f"margin:6px 8px 2px 8px;"
                 f"padding:6px 10px;"
                 f"border-radius:0 4px 4px 0;'>"
-                f"<span style='color:#569cd6;font-size:10px;font-weight:bold;'>"
-                f"USER</span>"
-                f"{'&nbsp;&nbsp;<span style=\"color:#3c5a7a;font-size:10px;\">' + ts_str + '</span>' if ts_str else ''}"
-                f"<br><span style='color:#b0c8e0;'>{text}</span>"
+                f"<span style='color:#b0c8e0;'>{text}</span>"
                 f"</div>"
             )
         else:
@@ -3269,16 +3490,280 @@ def _render_conversation_html(messages: list[dict]) -> str:
                 f"margin:2px 8px 6px 24px;"
                 f"padding:6px 10px;"
                 f"border-radius:0 4px 4px 0;'>"
-                f"<span style='color:#4ec94e;font-size:10px;font-weight:bold;'>"
-                f"CC</span>"
-                f"{'&nbsp;&nbsp;<span style=\"color:#2a5a2a;font-size:10px;\">' + ts_str + '</span>' if ts_str else ''}"
-                f"<br><span style='color:#c8e0c8;'>{text}</span>"
+                f"<span style='color:#c8e0c8;'>{text}</span>"
                 f"</div>"
             )
 
     parts.append("</body></html>")
     return "".join(parts)
 
+
+# ─── Discovery Panel ──────────────────────────────────────────────────────────
+
+class _DiscoveryCard(QFrame):
+    """Karta jednej wykrytej sesji CC (psutil).
+
+    Dwa tryby wizualne:
+    - zarządzana (assigned_slot > 0): kolorowa ramka po lewej + badge slotu, brak przycisków promote
+    - wolna (assigned_slot = 0): ciemna ramka, przyciski → Slot N
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Kolorowy pasek po lewej (widoczny tylko dla zarządzanych)
+        self._accent_bar = QFrame()
+        self._accent_bar.setFixedWidth(4)
+        self._accent_bar.setStyleSheet("background:#333333;border:none;border-radius:0;")
+        outer.addWidget(self._accent_bar)
+
+        inner = QWidget()
+        inner.setStyleSheet("background:transparent;")
+        root = QVBoxLayout(inner)
+        root.setContentsMargins(6, 5, 6, 5)
+        root.setSpacing(2)
+        outer.addWidget(inner, stretch=1)
+
+        # Wiersz nagłówkowy: nazwa + badge slotu
+        hdr_row = QHBoxLayout()
+        hdr_row.setContentsMargins(0, 0, 0, 0)
+        hdr_row.setSpacing(4)
+
+        self._name_lbl = QLabel()
+        self._name_lbl.setStyleSheet("color:#c8c8c8;font-size:11px;font-weight:bold;border:none;")
+        hdr_row.addWidget(self._name_lbl, stretch=1)
+
+        self._slot_badge = QLabel()
+        self._slot_badge.setFixedHeight(16)
+        self._slot_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._slot_badge.setStyleSheet(
+            "color:#000;font-size:8px;font-weight:bold;border-radius:3px;"
+            "padding:0 5px;border:none;"
+        )
+        self._slot_badge.hide()
+        hdr_row.addWidget(self._slot_badge)
+        root.addLayout(hdr_row)
+
+        self._path_lbl = QLabel()
+        self._path_lbl.setStyleSheet("color:#484848;font-size:8px;border:none;")
+        root.addWidget(self._path_lbl)
+
+        self._meta_lbl = QLabel()
+        self._meta_lbl.setStyleSheet("color:#585858;font-size:8px;border:none;")
+        root.addWidget(self._meta_lbl)
+
+        self._btn_row = QWidget()
+        self._btn_row.setStyleSheet("background:transparent;border:none;")
+        self._btn_layout = QHBoxLayout(self._btn_row)
+        self._btn_layout.setContentsMargins(0, 3, 0, 0)
+        self._btn_layout.setSpacing(4)
+        self._btn_layout.addStretch()
+        root.addWidget(self._btn_row)
+
+    def update_session(
+        self,
+        session: object,
+        free_slots: list[int],
+        on_promote,
+        assigned_slot: int = 0,
+    ) -> None:
+        cwd: str = getattr(session, "cwd", "")
+        self._name_lbl.setText(getattr(session, "project_name", "?"))
+
+        short_path = ("…" + cwd[-26:]) if len(cwd) > 28 else cwd
+        self._path_lbl.setText(short_path)
+        self._path_lbl.setToolTip(cwd)
+
+        elapsed = getattr(session, "elapsed_seconds", 0)
+        mins, secs = divmod(elapsed, 60)
+        hrs, mins = divmod(mins, 60)
+        elapsed_str = f"{hrs}h {mins}m" if hrs else (f"{mins}m {secs:02d}s" if mins else f"{secs}s")
+        pid = getattr(session, "pid", "?")
+        self._meta_lbl.setText(f"PID:{pid}  {elapsed_str}")
+
+        if assigned_slot:
+            # ── Karta zarządzana ─────────────────────────────────────────
+            color = SLOT_COLORS[assigned_slot - 1]
+            self.setStyleSheet(
+                f"QFrame{{background:#161616;border:1px solid {color}44;"
+                f"border-left:none;border-radius:0 4px 4px 0;}}"
+            )
+            self._accent_bar.setStyleSheet(
+                f"background:{color};border:none;border-radius:0;"
+            )
+            self._name_lbl.setStyleSheet(
+                f"color:{color};font-size:11px;font-weight:bold;border:none;"
+            )
+            self._slot_badge.setText(f"Slot {assigned_slot}")
+            self._slot_badge.setStyleSheet(
+                f"background:{color};color:#000;font-size:8px;"
+                f"font-weight:bold;border-radius:3px;padding:0 5px;border:none;"
+            )
+            self._slot_badge.show()
+            self._btn_row.hide()
+        else:
+            # ── Karta wolna ──────────────────────────────────────────────
+            self.setStyleSheet(
+                "QFrame{background:#1a1a1a;border:1px solid #2e2e2e;"
+                "border-left:none;border-radius:0 4px 4px 0;}"
+            )
+            self._accent_bar.setStyleSheet("background:#2e2e2e;border:none;border-radius:0;")
+            self._name_lbl.setStyleSheet(
+                "color:#c8c8c8;font-size:11px;font-weight:bold;border:none;"
+            )
+            self._slot_badge.hide()
+            self._btn_row.show()
+
+            # Przebuduj przyciski promote
+            while self._btn_layout.count() > 1:
+                item = self._btn_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            if free_slots:
+                for slot_id in free_slots[:3]:
+                    btn = QPushButton(f"→ {slot_id}")
+                    btn.setFixedHeight(18)
+                    btn.setToolTip(f"Przypisz do Slotu {slot_id}")
+                    btn.setStyleSheet(
+                        "QPushButton{background:#1e2e1e;color:#6ec87e;"
+                        "border:1px solid #2e4a2e;border-radius:3px;"
+                        "padding:0 6px;font-size:9px;}"
+                        "QPushButton:hover{background:#2a3e2a;}"
+                    )
+                    btn.clicked.connect(
+                        lambda checked, s=slot_id, c=cwd: on_promote(c, s)
+                    )
+                    self._btn_layout.insertWidget(self._btn_layout.count() - 1, btn)
+            else:
+                lbl = QLabel("brak wolnych slotów")
+                lbl.setStyleSheet("color:#484848;font-size:8px;border:none;")
+                self._btn_layout.insertWidget(0, lbl)
+
+
+class _DiscoveryPanel(QWidget):
+    """Prawostronny panel wszystkich wykrytych sesji CC (psutil-based).
+
+    Sesje przypisane do slotów 1–4 są wyróżnione kolorem slotu.
+    Sesje wolne mają przyciski promote → Slot N.
+    """
+
+    def __init__(
+        self,
+        get_free_slots,
+        on_promote,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._get_free_slots = get_free_slots
+        self._on_promote = on_promote
+        self._cards: list[_DiscoveryCard] = []
+        self._setup_ui()
+        self.setFixedWidth(205)
+        self.setStyleSheet("background:#111111;")
+
+    def _setup_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 2, 6)
+        root.setSpacing(4)
+
+        hdr = QLabel("Aktywne sesje CC")
+        hdr.setStyleSheet(
+            "color:#484848;font-size:9px;font-weight:bold;"
+            "letter-spacing:1px;background:transparent;"
+        )
+        root.addWidget(hdr)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#242424;background:#242424;")
+        sep.setFixedHeight(1)
+        root.addWidget(sep)
+
+        # Przewijalna lista kart (max 8 sesji)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            "QScrollArea{border:none;background:transparent;}"
+            "QScrollBar:vertical{background:#1a1a1a;width:6px;border:none;}"
+            "QScrollBar::handle:vertical{background:#333333;border-radius:3px;}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+        )
+
+        cards_container = QWidget()
+        cards_container.setStyleSheet("background:transparent;")
+        cards_layout = QVBoxLayout(cards_container)
+        cards_layout.setContentsMargins(0, 0, 4, 0)
+        cards_layout.setSpacing(5)
+
+        for _ in range(8):
+            card = _DiscoveryCard(cards_container)
+            card.hide()
+            self._cards.append(card)
+            cards_layout.addWidget(card)
+
+        cards_layout.addStretch()
+        scroll.setWidget(cards_container)
+        root.addWidget(scroll, stretch=1)
+
+        self._empty_lbl = QLabel("Brak aktywnych\nsesji CC")
+        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_lbl.setStyleSheet(
+            "color:#303030;font-size:10px;background:transparent;"
+        )
+        root.addWidget(self._empty_lbl)
+
+        self._no_psutil_lbl = QLabel("Zainstaluj psutil:\npip install psutil")
+        self._no_psutil_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._no_psutil_lbl.setStyleSheet(
+            "color:#553333;font-size:9px;background:transparent;"
+        )
+        self._no_psutil_lbl.hide()
+        root.addWidget(self._no_psutil_lbl)
+
+    def refresh(self, sessions: list, slot_assignment: dict) -> None:
+        """Odświeża karty dla wszystkich sesji.
+
+        Args:
+            sessions: Lista wszystkich wykrytych sesji CC.
+            slot_assignment: Mapa norm_path(cwd) → slot_id dla slotów 1–4.
+        """
+        try:
+            import psutil  # noqa: F401
+            psutil_ok = True
+        except ImportError:
+            psutil_ok = False
+
+        if not psutil_ok:
+            self._no_psutil_lbl.show()
+            self._empty_lbl.hide()
+            for card in self._cards:
+                card.hide()
+            return
+
+        self._no_psutil_lbl.hide()
+        free_slots = self._get_free_slots()
+
+        from src.watchers.process_scanner import norm_path as _np
+        for i, card in enumerate(self._cards):
+            if i < len(sessions):
+                sess = sessions[i]
+                assigned = slot_assignment.get(_np(getattr(sess, "cwd", "")), 0)
+                card.update_session(sess, free_slots, self._on_promote, assigned_slot=assigned)
+                card.show()
+            else:
+                card.hide()
+        self._empty_lbl.setVisible(len(sessions) == 0)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 
 class CCLauncherPanel(QWidget):
     """Główny panel 'Sesje CC' z 4 zakładkami slotów projektów."""
@@ -3288,10 +3773,18 @@ class CCLauncherPanel(QWidget):
         self._config = load_launcher_config()
         self._watcher = SessionWatcher(parent=self)
         self._slots: list[ProjectSlotWidget] = []
+        self._plan_watchers: list[object] = [None, None, None, None]  # _SSSPlanWatcher per slot
+
+        self._active_cwds: set[str] = set()
 
         self._setup_ui()
         self._connect_signals()
         self._watcher.start()
+
+        self._scan_timer = QTimer(self)
+        self._scan_timer.timeout.connect(self._scan_discovered)
+        self._scan_timer.start(10_000)
+        QTimer.singleShot(500, self._scan_discovered)
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -3308,7 +3801,21 @@ class CCLauncherPanel(QWidget):
             self._slot_tabs.addTab(slot, SLOT_NAMES[i])
             path = self._config.slots[i].project_path
             self._slot_tab_bar.setSubLabel(i, Path(path).name if path else "—")
-        root.addWidget(self._slot_tabs, stretch=1)
+        self._slot_tab_bar.folder_change_requested.connect(self._on_tab_folder_change)
+
+        self._discovery_panel = _DiscoveryPanel(
+            self._get_free_slots,
+            self._promote_to_slot,
+            parent=self,
+        )
+
+        content = QWidget()
+        content_row = QHBoxLayout(content)
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.setSpacing(4)
+        content_row.addWidget(self._slot_tabs, stretch=1)
+        content_row.addWidget(self._discovery_panel)
+        root.addWidget(content, stretch=1)
 
     def _build_header(self) -> QWidget:
         w = QWidget()
@@ -3328,7 +3835,41 @@ class CCLauncherPanel(QWidget):
         row.addWidget(self._term_selector)
 
         row.addStretch()
+
+        # Status sync — pojawia się na kilka sekund po synchronizacji
+        self._sync_status_lbl = QLabel()
+        self._sync_status_lbl.setStyleSheet("font-size:10px;")
+        self._sync_status_lbl.hide()
+        self._sync_status_timer = QTimer(self)
+        self._sync_status_timer.setSingleShot(True)
+        self._sync_status_timer.timeout.connect(self._sync_status_lbl.hide)
+        row.addWidget(self._sync_status_lbl)
+
         row.addWidget(QLabel("polling co 15s", styleSheet=_LBL_DIM))
+
+        sync_btn = QPushButton("⇄  Sync cc-panel")
+        sync_btn.setStyleSheet(
+            "QPushButton{background:#1a2e1a;color:#6ec87e;border:1px solid #2e4a2e;"
+            "border-radius:3px;padding:4px 12px}"
+            "QPushButton:hover{background:#243e24}"
+            "QPushButton:pressed{background:#1a2e1a}"
+        )
+        sync_btn.setFont(_FONT_SMALL)
+        sync_btn.setToolTip(
+            "Synchronizuje ścieżki projektów między cc-panel (ustawienia.json)\n"
+            "a slotami CM. Kierunek: cc-panel → slot (gdy cc-panel ma ścieżkę);\n"
+            "slot → cc-panel (gdy tylko CM ma ścieżkę)."
+        )
+        sync_btn.clicked.connect(self._sync_with_ccpanel)
+        row.addWidget(sync_btn)
+
+        ssm_btn = QPushButton("⚙ Zainstaluj hook SSM")
+        ssm_btn.setStyleSheet(_BTN)
+        ssm_btn.setFont(_FONT_SMALL)
+        ssm_btn.setToolTip("Instaluje hook SessionStart SSM w aktywnym projekcie SSS")
+        ssm_btn.clicked.connect(self._on_install_ssm_hook)
+        row.addWidget(ssm_btn)
+
         btn = QPushButton("⟳  Odśwież")
         btn.setStyleSheet(_BTN)
         btn.setFont(_FONT_MONO)
@@ -3336,9 +3877,136 @@ class CCLauncherPanel(QWidget):
         row.addWidget(btn)
         return w
 
+    def _on_install_ssm_hook(self) -> None:
+        """Instaluje hook SessionStart SSM w projekcie z aktywnego slotu."""
+        try:
+            from src.ssm_module.core.hook_installer import install_hook, is_sss_project
+        except ImportError:
+            QMessageBox.warning(self, "SSM niedostępny", "Moduł SSM nie jest załadowany.")
+            return
+
+        idx = self._slot_tabs.currentIndex()
+        slot_cfg = self._config.slots[idx] if 0 <= idx < len(self._config.slots) else None
+        path_str = slot_cfg.project_path if slot_cfg else ""
+        if not path_str:
+            QMessageBox.warning(self, "Brak projektu", "Aktywny slot nie ma ustawionego katalogu projektu.")
+            return
+
+        path = Path(path_str)
+        if not is_sss_project(path):
+            QMessageBox.warning(
+                self, "Nie jest projektem SSS",
+                f"{path.name} nie zawiera PLAN.md z markerem SSS.\n"
+                "Hook można zainstalować tylko w projektach inicjalizowanych przez SSS."
+            )
+            return
+
+        result = install_hook(path)
+        if result.already_installed:
+            QMessageBox.information(self, "Hook SSM", f"Hook SSM jest już zainstalowany w {path.name}.")
+        elif result.success:
+            QMessageBox.information(self, "Hook SSM", f"Hook SSM zainstalowany pomyślnie w {path.name}.")
+        else:
+            QMessageBox.critical(self, "Błąd instalacji", result.message)
+
     def _on_global_term_changed(self, n: int) -> None:
         self._config.terminal_count = max(1, min(4, int(n)))
         save_launcher_config(self._config)
+
+    # ── Synchronizacja z cc-panel ──────────────────────────────────────────
+
+    def _sync_with_ccpanel(self) -> None:
+        """Synchronizuje ścieżki projektów między cc-panel a slotami CM.
+
+        Kierunek dla każdego slotu i (0–3):
+        - cc-panel ma ścieżkę → nadpisuje slot CM (cc-panel = źródło aktywnej sesji)
+        - slot CM ma ścieżkę, cc-panel nie ma → zapisuje do cc-panel
+        - oba mają tę samą ścieżkę → brak akcji
+        Po synchronizacji wymusza odczyt metryk (force_refresh) i rescan procesów.
+        """
+        import json as _json
+
+        _CCPANEL_DIR = Path.home() / ".claude" / "cc-panel"
+        settings_path = _CCPANEL_DIR / "ustawienia.json"
+
+        # Wczytaj ustawienia cc-panel
+        try:
+            if settings_path.exists():
+                data: dict = _json.loads(settings_path.read_text(encoding="utf-8"))
+            else:
+                data = {}
+        except Exception:
+            data = {}
+
+        raw_paths = data.get("projectPaths", [])
+        if not isinstance(raw_paths, list):
+            raw_paths = []
+        cc_paths: list[str] = (raw_paths + ["", "", "", ""])[:4]
+
+        synced_to_cm = 0
+        synced_to_cc = 0
+
+        for i, slot in enumerate(self._slots):
+            cm_path = slot.get_config().project_path.strip()
+            cc_path = cc_paths[i].strip()
+
+            if cc_path and cc_path != cm_path:
+                # cc-panel → CM: cc-panel jest źródłem aktywnych sesji
+                slot._path_edit.setPlainText(cc_path)
+                slot.reload_plan()
+                slot.reload_stats()
+                slot.reload_md_files()
+                slot._notify_sss(cc_path)
+                synced_to_cm += 1
+
+            elif cm_path and not cc_path:
+                # CM → cc-panel: slot CM ma projekt, terminal cc-panel pusty
+                cc_paths[i] = cm_path
+                synced_to_cc += 1
+
+        # Zapisz zaktualizowane ścieżki do ustawienia.json
+        data["projectPaths"] = cc_paths
+        try:
+            _CCPANEL_DIR.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(
+                _json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            import sys as _sys
+            print(f"[sync] zapis ustawienia.json nie powiódł się: {exc}", file=_sys.stderr)
+
+        # Wymuś odczyt metryk i rescan procesów
+        self._on_config_changed()
+        self._watcher.force_refresh()
+        QTimer.singleShot(500, self._scan_discovered)
+
+        # Pokaż wynik w nagłówku
+        total = synced_to_cm + synced_to_cc
+        if total == 0:
+            self._show_sync_status("✓ Sloty już zsynchronizowane", "#6ec87e")
+        else:
+            parts = []
+            if synced_to_cm:
+                parts.append(f"cc→CM: {synced_to_cm}")
+            if synced_to_cc:
+                parts.append(f"CM→cc: {synced_to_cc}")
+            self._show_sync_status(f"✓ Zsynchronizowano ({', '.join(parts)})", "#6ec87e")
+
+    def _show_sync_status(self, text: str, color: str = "#6ec87e", duration_ms: int = 4_000) -> None:
+        """Pokazuje komunikat statusu synchronizacji w nagłówku przez duration_ms ms."""
+        self._sync_status_lbl.setText(text)
+        self._sync_status_lbl.setStyleSheet(f"color:{color};font-size:10px;")
+        self._sync_status_lbl.show()
+        self._sync_status_timer.start(duration_ms)
+
+    # ───────────────────────────────────────────────────────────────────────
+
+    def _on_tab_folder_change(self, idx: int) -> None:
+        """Otwiera dialog wyboru folderu dla slotu idx (podwójny prawy klik na zakładce)."""
+        if 0 <= idx < len(self._slots):
+            self._slot_tabs.setCurrentIndex(idx)
+            self._slots[idx]._on_browse()
 
     def _connect_signals(self) -> None:
         self._watcher.snapshot_updated.connect(self._on_snapshot)
@@ -3348,26 +4016,50 @@ class CCLauncherPanel(QWidget):
             slot.window_requested.connect(self._on_window)
             slot.stop_requested.connect(self._on_stop)
             slot.stop_completed.connect(self._on_stop_completed)
+            slot.sss_detected.connect(self._on_sss_detected)
+
+        # Wykryj SSS v2 dla slotów już wczytanych z konfiguracji
+        from PySide6.QtCore import QTimer as _QT
+        _QT.singleShot(0, self._detect_sss_all_slots)
 
     def _on_snapshot(self, snap: TerminalSnapshot) -> None:
         self._slots[snap.slot_id - 1].update_snapshot(snap)
-        # Aktualizuj wiersz statusu w tab barze
-        s = snap.seconds_since_change
-        mins = s // 60
-        secs = s % 60
-        elapsed = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+
+        # Weryfikacja procesem — jeśli CC nie działa w tym folderze, wymuś offline
+        from src.watchers.process_scanner import norm_path
+        from datetime import datetime, timezone
+        slot_path = self._config.slots[snap.slot_id - 1].project_path
+        has_proc = bool(slot_path and norm_path(slot_path) in self._active_cwds)
+
+        # Elapsed time ze źródła — ostatni timestamp w transkrypcie
+        elapsed = ""
+        if has_proc and snap.transcript_path:
+            last_ts = read_last_activity_ts(snap.transcript_path)
+            if last_ts:
+                delta = datetime.now(timezone.utc) - last_ts
+                s = max(0, int(delta.total_seconds()))
+                mins, secs = divmod(s, 60)
+                hrs, mins = divmod(mins, 60)
+                if hrs:
+                    elapsed = f"{hrs}h {mins}m"
+                elif mins:
+                    elapsed = f"{mins}m {secs:02d}s"
+                else:
+                    elapsed = f"{secs}s"
+
         self._slot_tab_bar.setStatusLabel(
             index=snap.slot_id - 1,
-            phase=snap.phase,
+            phase=snap.phase if has_proc else None,
             elapsed=elapsed,
-            is_missing=snap.is_file_missing,
+            is_missing=snap.is_file_missing or not has_proc,
         )
 
     def _on_config_changed(self) -> None:
         for i, slot in enumerate(self._slots):
             self._config.slots[i] = slot.get_config()
             path = self._config.slots[i].project_path
-            self._slot_tab_bar.setSubLabel(i, Path(path).name if path else "—")
+            if not slot._is_sss:
+                self._slot_tab_bar.setSubLabel(i, Path(path).name if path else "—")
         save_launcher_config(self._config)
 
     def assign_project(self, path: Path) -> int:
@@ -3388,8 +4080,51 @@ class CCLauncherPanel(QWidget):
         slot_widget.reload_plan()
         slot_widget.reload_stats()
         slot_widget.reload_md_files()
+        slot_widget._notify_sss(str(path))
         self._slot_tabs.setCurrentIndex(target - 1)
         return target
+
+    def _get_free_slots(self) -> list[int]:
+        """Zwraca numery slotów (1–4) bez przypisanego projektu."""
+        return [
+            i + 1 for i, slot in enumerate(self._slots)
+            if not slot.get_config().project_path.strip()
+        ]
+
+    def _scan_discovered(self) -> None:
+        """Skanuje procesy systemowe, aktualizuje statusy slotów i discovery panel."""
+        from src.watchers.process_scanner import scan_cc_processes, norm_path
+        all_sessions = scan_cc_processes()
+        self._active_cwds = {norm_path(s.cwd) for s in all_sessions}
+
+        # Mapa: norm_path(cwd) → slot_id (1–4) dla slotów z projektem
+        slot_assignment: dict[str, int] = {
+            norm_path(cfg.project_path): i + 1
+            for i, cfg in enumerate(self._config.slots)
+            if cfg.project_path
+        }
+
+        # Wszystkie sesje trafiają do panelu (max 8), każda wie czy jest zarządzana
+        self._discovery_panel.refresh(all_sessions[:8], slot_assignment)
+
+        # Wymuś offline dla slotów bez aktywnego procesu CC
+        for i, cfg_slot in enumerate(self._config.slots):
+            if cfg_slot.project_path and norm_path(cfg_slot.project_path) not in self._active_cwds:
+                self._slot_tab_bar.setStatusLabel(
+                    index=i, phase=None, elapsed="", is_missing=True,
+                )
+
+    def _promote_to_slot(self, cwd: str, slot_id: int) -> None:
+        """Przypisuje wykrytą sesję CC do wybranego slotu."""
+        slot_widget = self._slots[slot_id - 1]
+        slot_widget._path_edit.setPlainText(cwd)
+        slot_widget.reload_plan()
+        slot_widget.reload_stats()
+        slot_widget.reload_md_files()
+        slot_widget._notify_sss(cwd)
+        self._slot_tabs.setCurrentIndex(slot_id - 1)
+        self._on_config_changed()
+        QTimer.singleShot(500, self._scan_discovered)
 
     def _on_launch(self, slot_id: int) -> None:
         cfg = self._config.slots[slot_id - 1]
@@ -3406,11 +4141,18 @@ class CCLauncherPanel(QWidget):
             )
             return
 
+        # Sync cc-panel jeśli projekt SSS v2
+        if self._slots[slot_id - 1]._is_sss:
+            self._sync_ccpanel_path(slot_id, cfg.project_path)
+
         ok = prepare_and_launch(
             slot_id=slot_id,
             project_path=cfg.project_path,
             terminal_count=self._config.terminal_count,
             vibe_prompt=cfg.vibe_prompt,
+            model=cfg.model,
+            permission_flag=CC_PERMISSION_MODES.get(cfg.permission_mode, ""),
+            pre_command=cfg.pre_command,
         )
         if not ok:
             QMessageBox.critical(
@@ -3449,6 +4191,103 @@ class CCLauncherPanel(QWidget):
 
     def _on_stop_completed(self, slot_id: int) -> None:
         QTimer.singleShot(1000, self._watcher.force_refresh)
+
+    # ------------------------------------------------------------------ #
+    # SSS v2 — detekcja, PlanWatcher, sync cc-panel                        #
+    # ------------------------------------------------------------------ #
+
+    def _detect_sss_all_slots(self) -> None:
+        """Wykrywa SSS v2 dla wszystkich slotów z już załadowaną ścieżką."""
+        for slot in self._slots:
+            path = slot.get_config().project_path.strip()
+            slot._notify_sss(path)
+
+    def _on_sss_detected(self, slot_id: int, is_sss: bool, project_name: str) -> None:
+        """Obsługuje wykrycie (lub brak) projektu SSS v2 w slocie."""
+        idx = slot_id - 1
+        self._slot_tab_bar.setSssFlag(idx, is_sss)
+
+        # Sub-label zawsze pokazuje nazwę folderu — badge SSS informuje o typie projektu
+        path = self._config.slots[idx].project_path
+        self._slot_tab_bar.setSubLabel(idx, Path(path).name if path else "—")
+
+        if not is_sss:
+            self._slot_tab_bar.setSssPlanText(idx, "")
+
+        # Zarządzaj PlanWatcher
+        old = self._plan_watchers[idx]
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:
+                pass
+            self._plan_watchers[idx] = None
+
+        if is_sss and _SSS_AVAILABLE:
+            path = self._config.slots[idx].project_path
+            plan_path = Path(path) / "PLAN.md"
+            if plan_path.exists():
+                watcher = _SSSPlanWatcher(plan_path, parent=self)
+                watcher.qt_plan_changed.connect(
+                    lambda sections, i=idx: self._on_plan_changed(i, sections)
+                )
+                watcher.start()
+                self._plan_watchers[idx] = watcher
+
+    def _on_plan_changed(self, slot_idx: int, sections: dict) -> None:
+        """Aktualizuje tekst planu w tab barze po zmianie PLAN.md."""
+        meta = sections.get("meta", "")
+        status = ""
+        session = ""
+        for line in meta.splitlines():
+            line = line.strip().lstrip("- ")
+            if line.startswith("status:"):
+                status = line.split(":", 1)[1].strip()
+            elif line.startswith("session:"):
+                session = line.split(":", 1)[1].strip()
+        if status or session:
+            plan_text = f"📋 {status}" + (f" · sesja {session}" if session else "")
+            self._slot_tab_bar.setSssPlanText(slot_idx, plan_text)
+
+    def _sync_ccpanel_path(self, slot_id: int, path: str) -> None:
+        """Synchronizuje ścieżkę projektu SSS v2 do cc-panel ustawienia.json."""
+        import sys as _sys
+        settings_path = Path.home() / ".claude" / "cc-panel" / "ustawienia.json"
+        try:
+            data = (
+                json.loads(settings_path.read_text(encoding="utf-8"))
+                if settings_path.exists() else {}
+            )
+            paths: list[str] = data.get("projectPaths", ["", "", "", ""])
+            paths = (paths + ["", "", "", ""])[:4]
+            paths[slot_id - 1] = path
+            data["projectPaths"] = paths
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(f"[SSS] cc-panel sync failed: {exc}", file=_sys.stderr)
+
+    # ------------------------------------------------------------------ #
+    # Nawigacja do zakładek SSM / SSC w aktywnym slocie                    #
+    # ------------------------------------------------------------------ #
+
+    _TAB_SSM_IN_SLOT = 1   # indeks zakładki "Monitor" w ProjectSlotWidget
+    _TAB_SSC_IN_SLOT = 10  # indeks zakładki "Full Converter" (SSC) w ProjectSlotWidget
+
+    def show_ssm_tab(self) -> None:
+        """Przełącza aktywny slot na zakładkę SSS (SSM Monitor)."""
+        idx = self._slot_tabs.currentIndex()
+        if 0 <= idx < len(self._slots):
+            self._slots[idx]._tabs.setCurrentIndex(self._TAB_SSM_IN_SLOT)
+
+    def show_ssc_tab(self) -> None:
+        """Przełącza aktywny slot na zakładkę Full Converter (SSC)."""
+        idx = self._slot_tabs.currentIndex()
+        if 0 <= idx < len(self._slots):
+            self._slots[idx]._tabs.setCurrentIndex(self._TAB_SSC_IN_SLOT)
 
 
 def _wrap(layout: QHBoxLayout) -> QWidget:

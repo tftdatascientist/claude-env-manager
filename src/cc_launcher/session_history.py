@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,36 @@ from typing import Optional
 
 _AA_SESSIONS_PATH = Path.home() / ".claude" / "cc-panel" / "aa-sessions.jsonl"
 _PROJECTS_PATH = Path.home() / ".claude" / "projects"
+
+
+def _encode_project_path(project_path: str) -> str:
+    """Konwertuje ścieżkę projektu na format nazwy katalogu używany przez Claude Code.
+
+    Claude Code zamienia każdy znak poza [A-Za-z0-9-] na '-', co daje:
+      C:\\Users\\Sławek\\.MD\\10_PROJEKTY  →  C--Users-S-awek--MD-10-PROJEKTY
+    (dwukropek, ukośniki, kropki, podkreślenia, znaki spoza ASCII → '-')
+    """
+    s = str(Path(project_path).resolve())
+    return re.sub(r"[^A-Za-z0-9\-]", "-", s)
+
+
+def _find_project_dir(project_path: str) -> "Path | None":
+    """Zwraca katalog transkryptów dla projektu lub None."""
+    if not _PROJECTS_PATH.is_dir() or not project_path:
+        return None
+    encoded = _encode_project_path(project_path)
+    candidate = _PROJECTS_PATH / encoded
+    if candidate.is_dir():
+        return candidate
+    # Fallback: porównanie case-insensitive (Windows)
+    encoded_lower = encoded.lower()
+    try:
+        for d in _PROJECTS_PATH.iterdir():
+            if d.is_dir() and d.name.lower() == encoded_lower:
+                return d
+    except OSError:
+        pass
+    return None
 
 
 @dataclass
@@ -164,44 +195,10 @@ def _read_aa_sessions(terminal_id: int | None) -> list[SessionRecord]:
 
 
 def _count_transcripts(project_path: str) -> tuple[int, Optional[datetime]]:
-    """Liczy pliki transkryptów w ~/.claude/projects/ dla danego projektu.
-
-    Claude Code koduje ścieżkę projektu jako URL-encoded string (separator /).
-    Szuka katalogu pasującego do podanej ścieżki.
-
-    Args:
-        project_path: Ścieżka do katalogu projektu.
-
-    Returns:
-        Krotka (liczba_transkryptów, data_ostatniego).
-    """
-    if not _PROJECTS_PATH.is_dir():
-        return 0, None
-
-    # Claude Code zapisuje projekty jako URL-encoded ścieżkę
-    # np. C:\Users\...\projekt → "C%3A%5CUsers%5C...%5Cprojekt"
-    # Szukamy katalogu którego nazwa zdekodowana pasuje do ścieżki
-    norm = Path(project_path).resolve()
-    target_dir: Path | None = None
-
-    try:
-        for proj_dir in _PROJECTS_PATH.iterdir():
-            if not proj_dir.is_dir():
-                continue
-            try:
-                from urllib.parse import unquote
-                decoded = unquote(proj_dir.name).replace("%5C", "\\").replace("%2F", "/")
-                if Path(decoded).resolve() == norm:
-                    target_dir = proj_dir
-                    break
-            except Exception:
-                continue
-    except OSError:
-        return 0, None
-
+    """Liczy pliki transkryptów w ~/.claude/projects/ dla danego projektu."""
+    target_dir = _find_project_dir(project_path)
     if target_dir is None:
         return 0, None
-
     count = 0
     last_mtime: Optional[float] = None
     try:
@@ -213,47 +210,34 @@ def _count_transcripts(project_path: str) -> tuple[int, Optional[datetime]]:
                     last_mtime = mtime
     except OSError:
         return count, None
-
-    last_at = None
-    if last_mtime is not None:
-        last_at = datetime.fromtimestamp(last_mtime, tz=timezone.utc)
+    last_at = datetime.fromtimestamp(last_mtime, tz=timezone.utc) if last_mtime else None
     return count, last_at
+
+
+def list_project_transcripts(project_path: str) -> list[tuple[Path, float, int]]:
+    """Zwraca listę (path, mtime, rozmiar_bajtów) wszystkich transkryptów projektu.
+
+    Sortuje od najnowszego do najstarszego.
+    """
+    target_dir = _find_project_dir(project_path)
+    if target_dir is None:
+        return []
+    results: list[tuple[Path, float, int]] = []
+    try:
+        for f in target_dir.iterdir():
+            if f.suffix == ".jsonl" and f.is_file():
+                st = f.stat()
+                results.append((f, st.st_mtime, st.st_size))
+    except OSError:
+        pass
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
 
 
 def find_latest_transcript(project_path: str) -> Path | None:
     """Zwraca ścieżkę najnowszego transkryptu JSONL dla projektu lub None."""
-    if not _PROJECTS_PATH.is_dir() or not project_path:
-        return None
-    norm = Path(project_path).resolve()
-    target_dir: Path | None = None
-    try:
-        for proj_dir in _PROJECTS_PATH.iterdir():
-            if not proj_dir.is_dir():
-                continue
-            try:
-                from urllib.parse import unquote
-                decoded = unquote(proj_dir.name).replace("%5C", "\\").replace("%2F", "/")
-                if Path(decoded).resolve() == norm:
-                    target_dir = proj_dir
-                    break
-            except Exception:
-                continue
-    except OSError:
-        return None
-    if target_dir is None:
-        return None
-    best: Path | None = None
-    best_mtime = 0.0
-    try:
-        for f in target_dir.iterdir():
-            if f.suffix == ".jsonl" and f.is_file():
-                mtime = f.stat().st_mtime
-                if mtime > best_mtime:
-                    best_mtime = mtime
-                    best = f
-    except OSError:
-        pass
-    return best
+    entries = list_project_transcripts(project_path)
+    return entries[0][0] if entries else None
 
 
 def fmt_duration(seconds: int) -> str:

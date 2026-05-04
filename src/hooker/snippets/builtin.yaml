@@ -1,0 +1,75 @@
+# Hooker — biblioteka wbudowanych snippetów hooków CC
+# Format: lista obiektów snippet
+# Pola: name, hook_type, matcher (opcjonalne), command, description, tags[]
+# Użytkownik może nadpisać lub dodać snippety w ~/.claude/hooker_snippets_user.yaml
+
+snippets:
+  - name: "Blokuj rm -rf"
+    hook_type: PreToolUse
+    matcher: "Bash"
+    command: "python ~/.claude/hooks/block_rmrf.py"
+    description: "Blokuje wywołania Bash zawierające 'rm -rf'. Skrypt zwraca exit code 2 jeśli wykryje niebezpieczną komendę."
+    tags: [safety, bash, blocking]
+
+  - name: "Blokuj edycję .env"
+    hook_type: PreToolUse
+    matcher: "^(Write|Edit|MultiEdit)$"
+    command: "python ~/.claude/hooks/protect_dotenv.py"
+    description: "Blokuje zapis do plików .env i .env.*. Chroni sekrety przed przypadkowym nadpisaniem."
+    tags: [safety, secrets, blocking]
+
+  - name: "Log wywołań narzędzi"
+    hook_type: PostToolUse
+    matcher: ""
+    command: "python ~/.claude/hooks/tool_logger.py"
+    description: "Loguje każde wywołanie narzędzia (nazwa, args, wynik) do ~/.claude/logs/tools.jsonl."
+    tags: [logging, audit]
+
+  - name: "Auto-format po Write"
+    hook_type: PostToolUse
+    matcher: "^(Write|Edit)$"
+    command: "python ~/.claude/hooks/autoformat.py"
+    description: "Uruchamia ruff format / black na zmodyfikowanym pliku po każdym Write/Edit. Wymaga ruff lub black w PATH."
+    tags: [formatting, python]
+
+  - name: "Powiadomienie dźwiękowe Stop"
+    hook_type: Stop
+    matcher: ""
+    command: "python ~/.claude/hooks/sound_hook.py Stop"
+    description: "Odtwarza dźwięk gdy CC kończy swoją odpowiedź. Plik dźwiękowy konfigurowalny przez Sound Hook tab."
+    tags: [sound, notification]
+
+  - name: "Powiadomienie dźwiękowe Notification"
+    hook_type: Notification
+    matcher: ""
+    command: "python ~/.claude/hooks/sound_hook.py Notification"
+    description: "Odtwarza dźwięk gdy CC potrzebuje uwagi użytkownika (waiting for input)."
+    tags: [sound, notification]
+
+  - name: "Wstrzyknij git status przy starcie"
+    hook_type: UserPromptSubmit
+    matcher: ""
+    command: "python ~/.claude/hooks/inject_git_status.py"
+    description: "Przy każdym prompcie wstrzykuje aktualny git status i branch jako additionalContext. Skrypt musi zwracać JSON z hookSpecificOutput."
+    tags: [context, git, injection]
+
+  - name: "Blokuj stop dopóki testy nie przejdą"
+    hook_type: Stop
+    matcher: ""
+    command: "python ~/.claude/hooks/test_gate.py"
+    description: "Blokuje zakończenie sesji CC jeśli testy kończą się błędem. Wymaga pytest w PATH. Skrypt zwraca exit code 2 jeśli testy failują."
+    tags: [testing, flow-control, blocking]
+
+  - name: "Zapis raportu sesji"
+    hook_type: SessionEnd
+    matcher: ""
+    command: "python ~/.claude/hooks/session_report.py"
+    description: "Zapisuje podsumowanie sesji (czas trwania, koszty, narzędzia) do ~/.claude/logs/sessions.jsonl przy każdym zamknięciu."
+    tags: [logging, audit, session]
+
+  - name: "Wstrzyknij kontekst przy starcie sesji"
+    hook_type: SessionStart
+    matcher: ""
+    command: "python ~/.claude/hooks/session_context.py"
+    description: "Wstrzykuje stan projektu (PLAN.md, git branch, otwarte pliki) do kontekstu CC przy każdym starcie/resume sesji."
+    tags: [context, session, injection]

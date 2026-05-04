@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "hooker/hooks_schema",
+  "title": "Claude Code hooks section schema",
+  "description": "Schemat sekcji 'hooks' w settings.json Claude Code. Zbudowany na bazie hooks-guide.jsx i realnych plików konfiguracyjnych (brak oficjalnego schematu od Anthropic — 2026-05).",
+  "type": "object",
+  "properties": {
+    "hooks": {
+      "type": "object",
+      "description": "Mapa typów hooków do listy matcher-bloków.",
+      "properties": {
+        "PreToolUse":      { "$ref": "#/definitions/matcherList" },
+        "PostToolUse":     { "$ref": "#/definitions/matcherList" },
+        "UserPromptSubmit":{ "$ref": "#/definitions/matcherList" },
+        "Notification":    { "$ref": "#/definitions/matcherList" },
+        "Stop":            { "$ref": "#/definitions/matcherList" },
+        "SubagentStop":    { "$ref": "#/definitions/matcherList" },
+        "PreCompact":      { "$ref": "#/definitions/matcherList" },
+        "SessionStart":    { "$ref": "#/definitions/matcherList" },
+        "SessionEnd":      { "$ref": "#/definitions/matcherList" }
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/matcherList"
+      }
+    }
+  },
+  "definitions": {
+    "matcherList": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/matcherBlock" }
+    },
+    "matcherBlock": {
+      "type": "object",
+      "properties": {
+        "matcher": {
+          "type": "string",
+          "description": "Wyrażenie regularne filtrujące zdarzenia (np. tool_name). Puste = dopasuj wszystko."
+        },
+        "hooks": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/hookEntry" },
+          "minItems": 1
+        }
+      },
+      "required": ["hooks"],
+      "additionalProperties": false
+    },
+    "hookEntry": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["command", "http", "prompt", "agent"],
+          "description": "Typ hooka. 'command' — uruchamia komendę shell. 'http' — wysyła POST. 'prompt' — wstrzykuje tekst. 'agent' — uruchamia sub-agenta."
+        },
+        "command": {
+          "type": "string",
+          "description": "Komenda shell (wymagana dla type=command)."
+        },
+        "url": {
+          "type": "string",
+          "description": "URL endpointu (wymagany dla type=http)."
+        },
+        "async": {
+          "type": "boolean",
+          "description": "Jeśli true, CC nie czeka na wynik. Domyślnie false (synchroniczny)."
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Limit czasu wykonania w sekundach."
+        }
+      },
+      "required": ["type"],
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "command" } }, "required": ["type"] },
+          "then": { "required": ["command"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "http" } }, "required": ["type"] },
+          "then": { "required": ["url"] }
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

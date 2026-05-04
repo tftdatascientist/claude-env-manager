@@ -1,0 +1,79 @@
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1"
+  },
+  "permissions": {
+    "allow": ["Bash(npm run *)"],
+    "defaultMode": "auto"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/vscode/extensions/cc-panel/hooks/userpromptsubmit.js\""
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"C:/Users/Sławek/sounds/play_sound.sh\"",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3.13 \"C:/cc-tools/src/hook_stop.py\"",
+            "async": true
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/vscode/extensions/cc-panel/hooks/stop.js\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "\"tool_name\":\\s*\"Bash\"",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3.13 \"C:/cc-tools/hooks/py_run_notify.py\"",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "\"tool_name\":\\s*\"(Bash|Write|Edit)\"",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"C:/Users/Sławek/sounds/play_sound.sh\" beep",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

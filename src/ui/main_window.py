@@ -12,6 +12,15 @@ from PySide6.QtWidgets import (
 
 _RUN_LOG = Path.home() / ".claude" / "run_log.json"
 
+import sys as _sys
+from pathlib import Path as _Path
+_BB_SRC = _Path(__file__).resolve().parents[2] / "BB" / "src"
+if _BB_SRC.exists() and str(_BB_SRC) not in _sys.path:
+    _sys.path.insert(0, str(_BB_SRC))
+_SSC_SRC = _Path(__file__).resolve().parents[2] / "SSC" / "src"
+if _SSC_SRC.exists() and str(_SSC_SRC) not in _sys.path:
+    _sys.path.insert(0, str(_SSC_SRC))
+
 from src.models.resource import Resource
 from src.scanner.discovery import discover_all
 from src.scanner.indexer import build_tree
@@ -26,12 +35,18 @@ from src.ui.simulator.simulator_panel import SimulatorPanel
 from src.ui.projektant_panel import ProjectantPanel
 from src.ui.cc_launcher_panel import CCLauncherPanel
 from src.ui.zadania_panel import ZadaniaPanel
-
-import sys as _sys
-from pathlib import Path as _Path
-_BB_SRC = _Path(__file__).resolve().parents[2] / "BB" / "src"
-if _BB_SRC.exists() and str(_BB_SRC) not in _sys.path:
-    _sys.path.insert(0, str(_BB_SRC))
+try:
+    from cm.ssc_module.views.ssc_view import SscView  # type: ignore
+except ImportError as _ssc_err:
+    print(f"[SSC] zakładka wyłączona: {_ssc_err}", file=_sys.stderr)
+    SscView = None
+try:
+    from src.ssm_module.views.ssm_tab import SsmTab  # type: ignore
+    from src.ssm_module.core.ssm_service import SSMService as _SSMService  # type: ignore
+except ImportError as _ssm_err:
+    print(f"[SSM] zakładka wyłączona: {_ssm_err}", file=_sys.stderr)
+    SsmTab = None
+    _SSMService = None
 try:
     from coa.ui_panel import CoaPanel  # type: ignore
 except ImportError as _coa_err:
@@ -57,6 +72,18 @@ try:
 except ImportError as _wiki_err:
     print(f"[Wiki] zakładka wyłączona: {_wiki_err}", file=_sys.stderr)
     WikiPanel = None
+try:
+    from src.hooker.ui.main_view import HookerView  # type: ignore
+except ImportError as _hooker_err:
+    print(f"[Hooker] zakładka wyłączona: {_hooker_err}", file=_sys.stderr)
+    HookerView = None
+try:
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent / "AUSS" / "src"))
+    from asus.cm_view.asus_panel import AsusPanelWidget  # type: ignore
+    _sys.path.pop(0)
+except ImportError as _asus_err:
+    print(f"[ASUS] panel wyłączony: {_asus_err}", file=_sys.stderr)
+    AsusPanelWidget = None
 
 
 class MainWindow(QMainWindow):
@@ -69,6 +96,11 @@ class MainWindow(QMainWindow):
         self.resize(1400, 800)
 
         self._setup_menu()
+        if _SSMService is not None:
+            try:
+                _SSMService.instance()
+            except Exception as _ssm_exc:
+                print(f"[SSM] background service failed: {_ssm_exc}", file=_sys.stderr)
         self._setup_ui()
         self._show_page(self._PAGE_SESJE_CC)
         self._scan_resources()
@@ -89,12 +121,29 @@ class MainWindow(QMainWindow):
     _PAGE_PROJEKTANT = 6
     _PAGE_SESJE_CC = 7
     _PAGE_ZADANIA = 8
-    # BB panels start at 9 (dynamic, assigned in _setup_ui)
+    _PAGE_SSC = 9
+    _PAGE_SSM = 10
+    _PAGE_HOOKER = 11
+    _PAGE_ASUS = 12
+    # BB panels start at 13 (dynamic, assigned in _setup_ui)
 
     def _show_page(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
         if index == self._PAGE_ZADANIA:
             self._sync_zadania_from_active_slot()
+
+    def _show_page_hooks(self, tab_index: int = 0) -> None:
+        self._show_page(self._PAGE_HOOKER)
+        if self._hooker_panel is not None:
+            self._hooker_panel.setCurrentIndex(tab_index)
+
+    def _show_ssm_tab(self) -> None:
+        self._show_page(self._PAGE_SESJE_CC)
+        self._cc_launcher_panel.show_ssm_tab()
+
+    def _show_ssc_tab(self) -> None:
+        self._show_page(self._PAGE_SESJE_CC)
+        self._cc_launcher_panel.show_ssc_tab()
 
     def _setup_menu(self) -> None:
         menu_bar = self.menuBar()
@@ -147,10 +196,19 @@ class MainWindow(QMainWindow):
 
         tools_menu = menu_bar.addMenu("&Tools")
         tools_menu.addAction("&Simulator", lambda: self._show_page(self._PAGE_SIMULATOR), "Ctrl+6")
-        tools_menu.addSeparator()
-        cc_panel_menu = tools_menu.addMenu("&cc-panel")
-        cc_panel_menu.addAction("Ustaw folder &projektu…", self._cc_panel_set_project_folder)
-        cc_panel_menu.addAction("&Edytuj listy dropdown…", self._cc_panel_show_settings)
+        if AsusPanelWidget is not None:
+            tools_menu.addAction("&ASUS — Self Update", lambda: self._show_page(self._PAGE_ASUS), "Ctrl+A")
+
+        hooks_menu = menu_bar.addMenu("&Hooks")
+        hooks_menu.addAction("&Finder — szukaj hooków", lambda: self._show_page_hooks(0), "Ctrl+H")
+        hooks_menu.addAction("&Setup — edytuj hooki", lambda: self._show_page_hooks(1), "Ctrl+Shift+H")
+        hooks_menu.addSeparator()
+        hooks_menu.addAction("&Wiki — przewodnik", lambda: self._show_page_hooks(2))
+        hooks_menu.addAction("&Sound — dźwięki", lambda: self._show_page_hooks(3))
+
+        sss_menu = menu_bar.addMenu("&SSS")
+        sss_menu.addAction("&Monitor", self._show_ssm_tab)
+        sss_menu.addAction("&Converter", self._show_ssc_tab)
         tools_menu.addSeparator()
         tost_menu = tools_menu.addMenu("TOST — Token Monitor")
         tost_menu.addAction("&Monitor (Dashboard + Collector)", self._tost_monitor)
@@ -178,6 +236,10 @@ class MainWindow(QMainWindow):
         self._projektant_panel = ProjectantPanel()
         self._cc_launcher_panel = CCLauncherPanel()
         self._zadania_panel = ZadaniaPanel()
+        self._ssc_panel = SscView() if SscView is not None else None
+        self._ssm_panel = SsmTab() if SsmTab is not None else None
+        self._hooker_panel = HookerView() if HookerView is not None else None
+        self._asus_panel = AsusPanelWidget() if AsusPanelWidget is not None else None
         self._coa_panel = CoaPanel() if CoaPanel is not None else None
         self._iso_panel = IsoPanel() if IsoPanel is not None else None
         self._ingest_panel = IngestPanel() if IngestPanel is not None else None
@@ -207,9 +269,16 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._projektant_panel)         # 6 = Projektant
         self._stack.addWidget(self._cc_launcher_panel)        # 7 = Sesje CC
         self._stack.addWidget(self._zadania_panel)             # 8 = Zadania
+        # SSC: zawsze rezerwujemy slot 9 — placeholder QWidget gdy moduł nieosiągalny,
+        # żeby utrzymać stabilne indeksy BB poniżej.
+        from PySide6.QtWidgets import QWidget as _QWidget
+        self._stack.addWidget(self._ssc_panel if self._ssc_panel is not None else _QWidget())  # 9 = SSC
+        self._stack.addWidget(self._ssm_panel if self._ssm_panel is not None else _QWidget())  # 10 = SSM
+        self._stack.addWidget(self._hooker_panel if self._hooker_panel is not None else _QWidget())  # 11 = Hooker
+        self._stack.addWidget(self._asus_panel if self._asus_panel is not None else _QWidget())    # 12 = ASUS
 
-        # BB panels — track indices dynamically starting at 9
-        bb_idx = 9
+        # BB panels — track indices dynamically starting at 13
+        bb_idx = 13
         self._bb_page_coa = -1
         self._bb_page_iso = -1
         self._bb_page_ingest = -1
@@ -405,258 +474,6 @@ class MainWindow(QMainWindow):
     def _tost_notion_sync_once(self) -> None:
         from src.utils.tost import launch_notion_sync
         self._tost_launch(lambda: launch_notion_sync(once=True), "Notion Sync (once)")
-
-    # --- cc-panel helpers ---
-
-    _CC_TERMINAL_COLORS = ["#2dd4bf", "#fbbf24", "#a78bfa", "#fb7185"]  # teal/amber/purple/coral
-    _CC_TERMINAL_NAMES = ["T1 — teal", "T2 — amber", "T3 — purple", "T4 — coral"]
-
-    def _cc_panel_settings_path(self):
-        from pathlib import Path
-        return Path.home() / ".claude" / "cc-panel" / "ustawienia.json"
-
-    def _cc_panel_load_settings(self) -> dict:
-        import json
-        p = self._cc_panel_settings_path()
-        if not p.exists():
-            return {}
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-
-    def _cc_panel_save_settings(self, data: dict) -> None:
-        import json
-        p = self._cc_panel_settings_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    def _cc_panel_set_project_folder(self) -> None:
-        from pathlib import Path as _Path
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog, QFrame
-        from PySide6.QtCore import Qt
-        from PySide6.QtGui import QColor
-
-        data = self._cc_panel_load_settings()
-        # migrate legacy single projectPath
-        paths: list[str] = data.get("projectPaths", ["", "", "", ""])
-        if isinstance(paths, list):
-            paths = (paths + ["", "", "", ""])[:4]
-        else:
-            paths = ["", "", "", ""]
-        if not any(paths) and data.get("projectPath"):
-            paths[0] = data["projectPath"]
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("cc-panel — foldery projektów")
-        dlg.setMinimumWidth(580)
-        layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("Wybierz folder projektu dla każdego terminala:"))
-
-        path_labels: list[QLabel] = []
-
-        def refresh_labels() -> None:
-            for idx, lbl in enumerate(path_labels):
-                lbl.setText(paths[idx] or "(nieustawiony)")
-                lbl.setStyleSheet("color:#fff;" if paths[idx] else "color:#ccc;")
-
-        def make_swap(idx_a: int, idx_b: int) -> callable:
-            def swap():
-                paths[idx_a], paths[idx_b] = paths[idx_b], paths[idx_a]
-                refresh_labels()
-            return swap
-
-        for i, (name, color) in enumerate(zip(self._CC_TERMINAL_NAMES, self._CC_TERMINAL_COLORS)):
-            row = QHBoxLayout()
-
-            # swap buttons ↑↓
-            up_btn = QPushButton("↑")
-            up_btn.setFixedWidth(24)
-            up_btn.setEnabled(i > 0)
-            if i > 0:
-                up_btn.clicked.connect(make_swap(i, i - 1))
-            row.addWidget(up_btn)
-
-            down_btn = QPushButton("↓")
-            down_btn.setFixedWidth(24)
-            down_btn.setEnabled(i < 3)
-            if i < 3:
-                down_btn.clicked.connect(make_swap(i, i + 1))
-            row.addWidget(down_btn)
-
-            badge = QLabel(f"  {name}  ")
-            badge.setStyleSheet(
-                f"background:{color}; color:#000; border-radius:4px; padding:2px 6px; font-weight:bold;"
-            )
-            badge.setFixedWidth(130)
-            row.addWidget(badge)
-
-            lbl = QLabel(paths[i] or "(nieustawiony)")
-            lbl.setWordWrap(True)
-            lbl.setStyleSheet("color:#fff;" if paths[i] else "color:#ccc;")
-            path_labels.append(lbl)
-            row.addWidget(lbl, 1)
-
-            def make_picker(idx: int, lbl_ref: QLabel) -> callable:
-                def pick():
-                    start = paths[idx] if paths[idx] else str(_Path.home())
-                    folder = QFileDialog.getExistingDirectory(dlg, f"Folder dla T{idx+1}", start)
-                    if folder:
-                        paths[idx] = folder
-                        lbl_ref.setText(folder)
-                        lbl_ref.setStyleSheet("color:#fff;")
-                return pick
-
-            btn = QPushButton("…")
-            btn.setFixedWidth(30)
-            btn.clicked.connect(make_picker(i, lbl))
-            row.addWidget(btn)
-
-            sep = QFrame()
-            sep.setFrameShape(QFrame.Shape.HLine)
-
-            layout.addLayout(row)
-            layout.addWidget(sep)
-
-        btn_row = QHBoxLayout()
-        ok_btn = QPushButton("Zapisz")
-        cancel_btn = QPushButton("Anuluj")
-        ok_btn.clicked.connect(dlg.accept)
-        cancel_btn.clicked.connect(dlg.reject)
-        btn_row.addStretch()
-        btn_row.addWidget(cancel_btn)
-        btn_row.addWidget(ok_btn)
-        layout.addLayout(btn_row)
-
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            data["projectPaths"] = paths
-            data.pop("projectPath", None)  # usuń legacy
-            self._cc_panel_save_settings(data)
-            self._status_bar.set_status("cc-panel: foldery projektów zapisane")
-
-    def _cc_panel_show_settings(self) -> None:
-        from PySide6.QtWidgets import (
-            QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
-            QListWidget, QListWidgetItem, QPushButton, QInputDialog,
-            QLabel, QDialogButtonBox, QAbstractItemView,
-        )
-        from PySide6.QtCore import Qt
-
-        data = self._cc_panel_load_settings()
-        slash: list[dict] = data.get("slashDropdown", [])
-        user_cmds: list[dict] = data.get("userCommands", [])
-        messages: list[dict] = data.get("messages", [])
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("cc-panel — edycja list dropdown")
-        dlg.setMinimumSize(560, 440)
-        root = QVBoxLayout(dlg)
-
-        tabs = QTabWidget()
-        root.addWidget(tabs)
-
-        def make_list_widget(items: list[dict], fields: list[str]) -> tuple[QWidget, QListWidget]:
-            """Build tab with list + add/edit/delete/up/down buttons."""
-            w = QWidget()
-            h = QHBoxLayout(w)
-            lst = QListWidget()
-            lst.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-            for it in items:
-                display = " | ".join(str(it.get(f, "")) for f in fields)
-                li = QListWidgetItem(display)
-                li.setData(Qt.ItemDataRole.UserRole, dict(it))
-                lst.addItem(li)
-            h.addWidget(lst, 1)
-
-            btn_col = QVBoxLayout()
-            btn_col.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-            def refresh_item(li: QListWidgetItem, it: dict) -> None:
-                display = " | ".join(str(it.get(f, "")) for f in fields)
-                li.setText(display)
-                li.setData(Qt.ItemDataRole.UserRole, it)
-
-            def add_item() -> None:
-                values: dict = {}
-                for field in fields:
-                    label_map = {"label": "Etykieta w dropdown", "value": "Wartość (komenda)", "text": "Pełny tekst wiadomości"}
-                    prompt = label_map.get(field, field)
-                    val, ok = QInputDialog.getText(dlg, "Nowa pozycja", f"{prompt}:", text="")
-                    if not ok:
-                        return
-                    values[field] = val
-                display = " | ".join(str(values.get(f, "")) for f in fields)
-                li = QListWidgetItem(display)
-                li.setData(Qt.ItemDataRole.UserRole, values)
-                lst.addItem(li)
-                lst.setCurrentItem(li)
-
-            def edit_item() -> None:
-                li = lst.currentItem()
-                if not li:
-                    return
-                it = dict(li.data(Qt.ItemDataRole.UserRole))
-                for field in fields:
-                    label_map = {"label": "Etykieta w dropdown", "value": "Wartość (komenda)", "text": "Pełny tekst wiadomości"}
-                    prompt = label_map.get(field, field)
-                    val, ok = QInputDialog.getText(dlg, "Edycja", f"{prompt}:", text=it.get(field, ""))
-                    if not ok:
-                        return
-                    it[field] = val
-                refresh_item(li, it)
-
-            def delete_item() -> None:
-                row = lst.currentRow()
-                if row >= 0:
-                    lst.takeItem(row)
-
-            def move_up() -> None:
-                row = lst.currentRow()
-                if row > 0:
-                    item = lst.takeItem(row)
-                    lst.insertItem(row - 1, item)
-                    lst.setCurrentRow(row - 1)
-
-            def move_down() -> None:
-                row = lst.currentRow()
-                if row < lst.count() - 1:
-                    item = lst.takeItem(row)
-                    lst.insertItem(row + 1, item)
-                    lst.setCurrentRow(row + 1)
-
-            for label, fn in [("Dodaj", add_item), ("Edytuj", edit_item), ("Usuń", delete_item), ("↑ Wyżej", move_up), ("↓ Niżej", move_down)]:
-                btn = QPushButton(label)
-                btn.clicked.connect(fn)
-                btn_col.addWidget(btn)
-
-            h.addLayout(btn_col)
-            return w, lst
-
-        tab_slash, lst_slash = make_list_widget(slash, ["label", "value"])
-        tabs.addTab(tab_slash, "Slash (/cmd)")
-
-        tab_user, lst_user = make_list_widget(user_cmds, ["label", "value"])
-        tabs.addTab(tab_user, "Komendy użytk.")
-
-        tab_msg, lst_msg = make_list_widget(messages, ["label", "text"])
-        tabs.addTab(tab_msg, "Wiadomości")
-
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        root.addWidget(btns)
-
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        def collect(lst_w: QListWidget) -> list[dict]:
-            return [lst_w.item(i).data(Qt.ItemDataRole.UserRole) for i in range(lst_w.count())]
-
-        data["slashDropdown"] = collect(lst_slash)
-        data["userCommands"] = collect(lst_user)
-        data["messages"] = collect(lst_msg)
-        self._cc_panel_save_settings(data)
-        self._status_bar.set_status("cc-panel: listy dropdown zapisane")
 
     def _run_log_poll_tick(self) -> None:
         """Sprawdzaj co 10s czy run_log.json już istnieje i podepnij watcher."""

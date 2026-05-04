@@ -44,3 +44,85 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_process ON events(process_name);
+
+CREATE TABLE IF NOT EXISTS focus_sessions (
+    id INTEGER PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_s INTEGER NOT NULL DEFAULT 0,
+    score INTEGER,
+    whitelist_snapshot TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS focus_process_samples (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES focus_sessions(id) ON DELETE CASCADE,
+    ts TEXT NOT NULL,
+    process_name TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_focus_samples_session ON focus_process_samples(session_id);
+
+CREATE TABLE IF NOT EXISTS cc_sessions (
+    id INTEGER PRIMARY KEY,
+    project_path TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_s INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS cc_snapshots (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES cc_sessions(id) ON DELETE CASCADE,
+    ts TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    exe TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cc_snapshots_session ON cc_snapshots(session_id);
+CREATE INDEX IF NOT EXISTS idx_cc_sessions_started ON cc_sessions(started_at);
+
+CREATE TABLE IF NOT EXISTS break_events (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    minutes_worked INTEGER NOT NULL DEFAULT 0,
+    event_type TEXT NOT NULL CHECK (event_type IN ('suggested', 'taken', 'skipped'))
+);
+
+CREATE TABLE IF NOT EXISTS distraction_events (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    switches_per_min REAL NOT NULL,
+    duration_s INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_break_events_ts ON break_events(ts);
+CREATE INDEX IF NOT EXISTS idx_distraction_events_ts ON distraction_events(ts);
+
+CREATE TABLE IF NOT EXISTS web_visits (
+    id INTEGER PRIMARY KEY,
+    url TEXT NOT NULL UNIQUE,
+    domain TEXT NOT NULL,
+    page_title TEXT,
+    browser TEXT,
+    category_id INTEGER REFERENCES categories(id),
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    visit_count INTEGER NOT NULL DEFAULT 1,
+    total_time_s INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_web_visits_domain ON web_visits(domain);
+CREATE INDEX IF NOT EXISTS idx_web_visits_last_seen ON web_visits(last_seen_at);
+
+CREATE TABLE IF NOT EXISTS app_usage (
+    id INTEGER PRIMARY KEY,
+    process_name TEXT NOT NULL UNIQUE,
+    exe_path TEXT,
+    category_id INTEGER REFERENCES categories(id),
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    total_time_s INTEGER NOT NULL DEFAULT 0,
+    focus_switches INTEGER NOT NULL DEFAULT 0,
+    is_dev_tool INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_app_usage_last_seen ON app_usage(last_seen_at);

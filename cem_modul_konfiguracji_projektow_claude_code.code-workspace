@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"path": "../../../cc-tools/Projekty_CC/cem_modul_konfiguracji_projektow_claude_code"
+		},
+		{
+			"path": "system-start"
+		},
+		{
+			"path": "../Documents/.MD/PARA/SER/CLAUDE CODE/WMS"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"terminal.integrated.defaultProfile.windows": "PowerShell"
+	}
+}

@@ -2,3 +2,5 @@ PySide6>=6.7
 QScintilla>=2.14
 watchdog>=4.0
 pytest>=8.0
+pyyaml>=6.0
+psutil>=5.9.0

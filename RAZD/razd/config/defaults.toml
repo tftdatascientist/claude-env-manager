@@ -1,0 +1,26 @@
+[tracking]
+poll_interval_ms = 2000       # jak często tracker odpytuje system (ms)
+idle_threshold_secs = 60      # po ilu sekundach braku input uznajemy idle
+browser_url_enabled = true    # czy wyciągamy URL z Chrome/Edge
+
+[agent]
+unknown_process_cooldown_secs = 300  # nie pytaj o ten sam proces częściej niż co X sek
+max_pending_questions = 5            # max kolejka pytań do usera
+
+[paths]
+# nadpisz jeśli chcesz inną lokalizację bazy danych
+# db = "~/.razd/razd.db"
+
+[focus]
+default_duration_mins = 25    # domyślny czas focus session
+alert_sound = false           # dźwięk przy ucieczce z focus (wymaga pygame)
+whitelist = []                # lista procesów dozwolonych w focus session
+
+[break]
+work_interval_min = 50       # po ilu minutach ciągłej pracy przypomnij o przerwie
+distraction_threshold = 6.0  # przełączeń apek/min powyżej którego alert skupienia
+
+[notion]
+enabled = false               # włącz sync do Notion (wymaga tokena w .env)
+sync_interval_mins = 15       # co ile minut synchronizuj
+export_urls = false           # czy wysyłać URL-e (privacy — domyślnie false)

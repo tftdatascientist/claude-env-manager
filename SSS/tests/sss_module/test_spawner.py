@@ -45,7 +45,8 @@ def test_spawn_calls_cc_with_plan_flag(tmp_path, spawner):
 
     calls = mock_popen.call_args_list
     cc_call = calls[0][0][0]
-    assert "--plan" in cc_call
+    assert "--permission-mode" in cc_call
+    assert "plan" in cc_call
     assert "my prompt" in cc_call
 
 
@@ -64,3 +65,34 @@ def test_session_id_contains_slug(tmp_path, spawner):
         session_id, _ = spawner.spawn("p", "my-project", tmp_path)
 
     assert "my_project" in session_id or "my-project" in session_id
+
+
+def test_resume_returns_project_dir(tmp_path, spawner):
+    existing = tmp_path / "existing-project"
+    existing.mkdir()
+
+    with patch("subprocess.Popen") as mock_popen:
+        session_id, project_dir = spawner.resume(existing)
+
+    assert project_dir == existing
+    assert "existing" in session_id
+
+
+def test_resume_calls_cc_continue(tmp_path, spawner):
+    existing = tmp_path / "proj"
+    existing.mkdir()
+
+    with patch("subprocess.Popen") as mock_popen:
+        spawner.resume(existing)
+
+    cc_call = mock_popen.call_args_list[0][0][0]
+    assert "--continue" in cc_call
+    assert "--permission-mode" in cc_call
+    assert "plan" in cc_call
+
+
+def test_resume_raises_if_dir_missing(tmp_path, spawner):
+    missing = tmp_path / "does-not-exist"
+
+    with pytest.raises(FileNotFoundError):
+        spawner.resume(missing)

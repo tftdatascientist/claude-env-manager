@@ -47,12 +47,18 @@ def _write_launch_request(
     project_path: str,
     terminal_count: int,
     vibe_prompt: str,
+    model: str = "",
+    permission_flag: str = "",
+    pre_command: str = "",
 ) -> None:
     payload = {
         "slotId": slot_id,
         "projectPath": project_path,
         "terminalCount": max(1, min(4, terminal_count)),
+        "preCommand": pre_command,
         "vibePrompt": vibe_prompt,
+        "model": model,
+        "permissionFlag": permission_flag,
     }
     _LAUNCH_REQUEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     _LAUNCH_REQUEST_PATH.write_text(
@@ -70,16 +76,21 @@ def prepare_and_launch(
     project_path: str,
     terminal_count: int = 1,
     vibe_prompt: str = "",
+    model: str = "",
+    permission_flag: str = "",
+    pre_command: str = "",
 ) -> bool:
     """Zapisuje konfigurację slotu i uruchamia VS Code z cc-panel.
 
     VS Code aktywuje ccPanel.launchSlot który odczyta launch-request.json
     i sam otworzy panel + terminale + wklei prompt po załadowaniu CC.
+    Pola model i permissionFlag trafiają do launch-request.json — cc-panel
+    powinien je odczytać i użyć przy budowaniu komendy startowej CC.
     """
     if not project_path or not Path(project_path).is_dir():
         return False
     _update_ustawienia_path(slot_id, project_path)
-    _write_launch_request(slot_id, project_path, terminal_count, vibe_prompt)
+    _write_launch_request(slot_id, project_path, terminal_count, vibe_prompt, model, permission_flag, pre_command)
     return _run_code(project_path, "--command", "ccPanel.launchSlot")
 
 

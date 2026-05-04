@@ -1,0 +1,75 @@
+{
+  "version": "0.7",
+  "generated_at": "2026-04-24T01:00:02.095Z",
+  "project": {
+    "title": "System do zarządzania przebiegiem pracy z w projektem Claude Code",
+    "slug": "system-do-zarzadzania-przebiegiem-pracy-z-w-projek",
+    "tags": [
+      "automation",
+      "ai",
+      "cli"
+    ],
+    "one_liner": "Pliki CLAUDE,ARCHITECTURE,PLAN,CONVENTIONS . Zmiany w tych plikach są kontrolowane przez skrypt pythona deterministyczne a subagenci ingerują tylko w przypadku awarii. Wszystkie pozycje są zmapowane w notion i kontrolowane 2 razy na okno a jedyny edytowalny plik w trakcie pracy to PLAN.md. Po zakończeniu rundy. PLAN.md jest czyszczony z wykonanych zadań i innych wpisów. Informację które chciały się zapisać do pozostałych MD są przetwarzane i po rundzie i segregowane w opodwiednie miejsca, Po wygenerowaniu szablonu.md urchomiony jest plan mode na tej podstawie jest poprawiany szablon następnie .Jedyne zmiany sa w PLAN.md za cały proces odpowiada SKILL za zmiany w plikach python  według decyzjii Agenta ze SKILL",
+    "type": "other",
+    "client": "własny",
+    "stack": "Dobierz"
+  },
+  "subpages": {
+    "CLAUDE.md": {
+      "fields": {
+        "off_limits": "- nie edytuj CLAUDE.md, ARCHITECTURE.md ani CONVENTIONS.md ręcznie w trakcie sesji\n- nie pomijaj walidacji pythonowego skryptu kontrolnego przy zmianach plików MD\n- nie zapisuj informacji poza PLAN.md podczas aktywnej rundy",
+        "specifics": "- PLAN.md to jedyny plik edytowalny w trakcie rundy – wszystkie inne zmiany przechodzą przez skrypt Python\n- po zakończeniu rundy PLAN.md jest czyszczony; informacje segregowane do odpowiednich MD przez SKILL\n- subagenci ingerują tylko przy awarii skryptu deterministycznego, nie jako domyślny przepływ\n- szablon.md generowany jest przed uruchomieniem plan mode – kolejność ma znaczenie"
+      },
+      "rendered": "<!-- CLAUDE v1.1 -->\n\n# System do zarządzania przebiegiem pracy z w projektem Claude Code\n\nPliki CLAUDE,ARCHITECTURE,PLAN,CONVENTIONS . Zmiany w tych plikach są kontrolowane przez skrypt pythona deterministyczne a subagenci ingerują tylko w przypadku awarii. Wszystkie pozycje są zmapowane w notion i kontrolowane 2 razy na okno a jedyny edytowalny plik w trakcie pracy to PLAN.md. Po zakończeniu rundy. PLAN.md jest czyszczony z wykonanych zadań i innych wpisów. Informację które chciały się zapisać do pozostałych MD są przetwarzane i po rundzie i segregowane w opodwiednie miejsca, Po wygenerowaniu szablonu.md urchomiony jest plan mode na tej podstawie jest poprawiany szablon następnie .Jedyne zmiany sa w PLAN.md za cały proces odpowiada SKILL za zmiany w plikach python  według decyzjii Agenta ze SKILL\n\n## Imports\n<!-- SECTION:imports -->\n@ARCHITECTURE.md\n@PLAN.md\n@CONVENTIONS.md\n<!-- /SECTION:imports -->\n\n## Project\n<!-- SECTION:project -->\n- name: System do zarządzania przebiegiem pracy z w projektem Claude Code\n- type: other\n- client: własny\n- stack: Dobierz\n<!-- /SECTION:project -->\n\n## Off Limits\n<!-- SECTION:off_limits -->\n- nie edytuj CLAUDE.md, ARCHITECTURE.md ani CONVENTIONS.md ręcznie w trakcie sesji\n- nie pomijaj walidacji pythonowego skryptu kontrolnego przy zmianach plików MD\n- nie zapisuj informacji poza PLAN.md podczas aktywnej rundy\n<!-- /SECTION:off_limits -->\n\n## Specifics\n<!-- SECTION:specifics -->\n- PLAN.md to jedyny plik edytowalny w trakcie rundy – wszystkie inne zmiany przechodzą przez skrypt Python\n- po zakończeniu rundy PLAN.md jest czyszczony; informacje segregowane do odpowiednich MD przez SKILL\n- subagenci ingerują tylko przy awarii skryptu deterministycznego, nie jako domyślny przepływ\n- szablon.md generowany jest przed uruchomieniem plan mode – kolejność ma znaczenie\n<!-- /SECTION:specifics -->\n",
+      "notion_page_id": null
+    },
+    "ARCHITECTURE.md": {
+      "fields": {
+        "overview": "System zarządza cyklem życia projektu Claude Code poprzez cztery pliki MD (CLAUDE, ARCHITECTURE, PLAN, CONVENTIONS), których integralność chroniona jest deterministycznym skryptem Python. Jedynym plikiem modyfikowanym przez agentów w trakcie sesji jest PLAN.md; pozostałe aktualizowane są po rundzie przez komponent SKILL. Wszystkie pozycje są zsynchronizowane z Notion i weryfikowane dwukrotnie na okno kontekstowe.",
+        "components": "- SKILL Agent: podejmuje decyzje o zmianach w plikach MD i deleguje zapisy do skryptu Python\n- Python Controller: deterministyczny skrypt wykonujący zapis/walidację plików MD poza PLAN.md\n- PLAN.md Runtime: jedyny plik edytowalny w trakcie rundy; czyszczony po jej zakończeniu\n- Notion Sync: mapuje i weryfikuje wszystkie pozycje z plików MD w bazie Notion\n- Template Engine: generuje szablon.md przed uruchomieniem plan mode\n- Plan Mode: na podstawie szablonu.md poprawia i zatwierdza strukturę PLAN.md",
+        "data_flow": "User/Agent → PLAN.md → [koniec rundy] → SKILL → Python Controller → CLAUDE/ARCHITECTURE/CONVENTIONS.md → Notion Sync",
+        "external_deps": "- python: 3.11+\n- notion-client: 2.2+\n- pydantic: 2.7+\n- typer: 0.12+\n- watchdog: 4.0+\n- pytest: 8.2+",
+        "decisions": "- [x] skrypt Python jako jedyny zapis do MD | 2026-04-24 | eliminuje niespójności przy równoległych agentach\n- [x] PLAN.md czyszczony po rundzie nie w trakcie | 2026-04-24 | zachowana ciągłość kontekstu sesji\n- [x] Notion jako source of truth dla audytu | 2026-04-24 | umożliwia śledzenie historii zmian poza repo\n- [x] subagenci tylko jako fallback | 2026-04-24 | deterministyczny flow jest przewidywalny i testowalny",
+        "constraints": "- skrypt Python musi zakończyć się sukcesem przed każdym commitem do plików MD\n- Notion sync musi odbyć się dwukrotnie w oknie kontekstowym (start i koniec)\n- plan mode uruchamiany wyłącznie po wygenerowaniu szablonu.md"
+      },
+      "rendered": "<!-- ARCHITECTURE v1.1 -->\n\n## Overview\n<!-- SECTION:overview -->\nSystem zarządza cyklem życia projektu Claude Code poprzez cztery pliki MD (CLAUDE, ARCHITECTURE, PLAN, CONVENTIONS), których integralność chroniona jest deterministycznym skryptem Python. Jedynym plikiem modyfikowanym przez agentów w trakcie sesji jest PLAN.md; pozostałe aktualizowane są po rundzie przez komponent SKILL. Wszystkie pozycje są zsynchronizowane z Notion i weryfikowane dwukrotnie na okno kontekstowe.\n<!-- /SECTION:overview -->\n\n## Components\n<!-- SECTION:components -->\n- SKILL Agent: podejmuje decyzje o zmianach w plikach MD i deleguje zapisy do skryptu Python\n- Python Controller: deterministyczny skrypt wykonujący zapis/walidację plików MD poza PLAN.md\n- PLAN.md Runtime: jedyny plik edytowalny w trakcie rundy; czyszczony po jej zakończeniu\n- Notion Sync: mapuje i weryfikuje wszystkie pozycje z plików MD w bazie Notion\n- Template Engine: generuje szablon.md przed uruchomieniem plan mode\n- Plan Mode: na podstawie szablonu.md poprawia i zatwierdza strukturę PLAN.md\n<!-- /SECTION:components -->\n\n## Data Flow\n<!-- SECTION:data_flow -->\nUser/Agent → PLAN.md → [koniec rundy] → SKILL → Python Controller → CLAUDE/ARCHITECTURE/CONVENTIONS.md → Notion Sync\n<!-- /SECTION:data_flow -->\n\n## External Deps\n<!-- SECTION:external_deps -->\n- python: 3.11+\n- notion-client: 2.2+\n- pydantic: 2.7+\n- typer: 0.12+\n- watchdog: 4.0+\n- pytest: 8.2+\n<!-- /SECTION:external_deps -->\n\n## Decisions\n<!-- SECTION:decisions -->\n- [x] skrypt Python jako jedyny zapis do MD | 2026-04-24 | eliminuje niespójności przy równoległych agentach\n- [x] PLAN.md czyszczony po rundzie nie w trakcie | 2026-04-24 | zachowana ciągłość kontekstu sesji\n- [x] Notion jako source of truth dla audytu | 2026-04-24 | umożliwia śledzenie historii zmian poza repo\n- [x] subagenci tylko jako fallback | 2026-04-24 | deterministyczny flow jest przewidywalny i testowalny\n<!-- /SECTION:decisions -->\n\n## Constraints\n<!-- SECTION:constraints -->\n- skrypt Python musi zakończyć się sukcesem przed każdym commitem do plików MD\n- Notion sync musi odbyć się dwukrotnie w oknie kontekstowym (start i koniec)\n- plan mode uruchamiany wyłącznie po wygenerowaniu szablonu.md\n<!-- /SECTION:constraints -->\n",
+      "notion_page_id": null
+    },
+    "CONVENTIONS.md": {
+      "fields": {
+        "naming": "- files: snake_case.py / kebab-case.md\n- classes: PascalCase (np. PlanController)\n- functions: snake_case z czasownikiem (np. flush_plan, sync_notion)\n- variables: snake_case; stałe UPPER_SNAKE_CASE",
+        "file_layout": "- src/controller.py: logika Python Controller i walidacja MD\n- src/skill.py: agent SKILL – decyzje i orchestracja\n- src/notion_sync.py: integracja z Notion API\n- templates/: szablony .md używane przez Template Engine\n- tests/: testy jednostkowe i integracyjne kontrolera",
+        "code_style": "- każda zmiana pliku MD przechodzi przez controller.py – nigdy przez bezpośredni zapis\n- SKILL podejmuje decyzję, Python wykonuje – separacja odpowiedzialności\n- błędy skryptu muszą być obsłużone zanim subagent przejmie kontrolę\n- funkcje kontrolera są idempotentne – wielokrotne wywołanie nie psuje stanu",
+        "commit_style": "- feat(plan): opis zmiany w PLAN.md lub logice rundy\n- fix(controller): naprawa skryptu Python lub walidacji MD\n- sync(notion): aktualizacja mapowania lub struktury Notion",
+        "testing": "- każda funkcja controller.py pokryta testem jednostkowym z mockowanym systemem plików\n- testy integracyjne weryfikują pełny cykl: zapis → walidacja → sync\n- testy uruchamiane przed każdym merge do main",
+        "anti_patterns": "- nigdy nie zapisuj do CLAUDE.md / ARCHITECTURE.md / CONVENTIONS.md z poziomu agenta w trakcie rundy\n- nigdy nie uruchamiaj plan mode przed wygenerowaniem szablonu.md\n- nigdy nie pomijaj walidacji Python Controller nawet przy drobnych zmianach\n- nigdy nie synchronizuj Notion ręcznie z pominięciem notion_sync.py"
+      },
+      "rendered": "<!-- CONVENTIONS v1.0 -->\n\n## Naming\n<!-- SECTION:naming -->\n- files: snake_case.py / kebab-case.md\n- classes: PascalCase (np. PlanController)\n- functions: snake_case z czasownikiem (np. flush_plan, sync_notion)\n- variables: snake_case; stałe UPPER_SNAKE_CASE\n<!-- /SECTION:naming -->\n\n## File Layout\n<!-- SECTION:file_layout -->\n- src/controller.py: logika Python Controller i walidacja MD\n- src/skill.py: agent SKILL – decyzje i orchestracja\n- src/notion_sync.py: integracja z Notion API\n- templates/: szablony .md używane przez Template Engine\n- tests/: testy jednostkowe i integracyjne kontrolera\n<!-- /SECTION:file_layout -->\n\n## Code Style\n<!-- SECTION:code_style -->\n- każda zmiana pliku MD przechodzi przez controller.py – nigdy przez bezpośredni zapis\n- SKILL podejmuje decyzję, Python wykonuje – separacja odpowiedzialności\n- błędy skryptu muszą być obsłużone zanim subagent przejmie kontrolę\n- funkcje kontrolera są idempotentne – wielokrotne wywołanie nie psuje stanu\n<!-- /SECTION:code_style -->\n\n## Commit Style\n<!-- SECTION:commit_style -->\n- feat(plan): opis zmiany w PLAN.md lub logice rundy\n- fix(controller): naprawa skryptu Python lub walidacji MD\n- sync(notion): aktualizacja mapowania lub struktury Notion\n<!-- /SECTION:commit_style -->\n\n## Testing\n<!-- SECTION:testing -->\n- każda funkcja controller.py pokryta testem jednostkowym z mockowanym systemem plików\n- testy integracyjne weryfikują pełny cykl: zapis → walidacja → sync\n- testy uruchamiane przed każdym merge do main\n<!-- /SECTION:testing -->\n\n## Anti Patterns\n<!-- SECTION:anti_patterns -->\n- nigdy nie zapisuj do CLAUDE.md / ARCHITECTURE.md / CONVENTIONS.md z poziomu agenta w trakcie rundy\n- nigdy nie uruchamiaj plan mode przed wygenerowaniem szablonu.md\n- nigdy nie pomijaj walidacji Python Controller nawet przy drobnych zmianach\n- nigdy nie synchronizuj Notion ręcznie z pominięciem notion_sync.py\n<!-- /SECTION:anti_patterns -->\n",
+      "notion_page_id": null
+    },
+    "PLAN.md": {
+      "fields": {
+        "initial_goal": "Zbudować szkielet systemu: Python Controller + SKILL Agent + Template Engine z pełnym cyklem rundy.",
+        "initial_current": "Inicjalizacja struktury repo i pliku src/controller.py z podstawową walidacją MD",
+        "initial_current_file": "src/controller.py",
+        "initial_next": "- [ ] Utworzyć strukturę katalogów (src/, templates/, tests/)\n- [ ] Zaimplementować controller.py: zapis/walidacja PLAN.md\n- [ ] Zaimplementować flush_plan() – czyszczenie po rundzie\n- [ ] Przygotować templates/plan_template.md dla Template Engine\n- [ ] Napisać testy jednostkowe dla controller.py"
+      },
+      "rendered": "<!-- PLAN v2.0 -->\n\n## Meta\n<!-- SECTION:meta -->\n- status: active\n- goal: Zbudować szkielet systemu: Python Controller + SKILL Agent + Template Engine z pełnym cyklem rundy.\n- session: 1\n- updated: 2026-04-24 01:00\n<!-- /SECTION:meta -->\n\n## Current\n<!-- SECTION:current -->\n- task: Inicjalizacja struktury repo i pliku src/controller.py z podstawową walidacją MD\n- file: src/controller.py\n- started: 2026-04-24 01:00\n<!-- /SECTION:current -->\n\n## Next\n<!-- SECTION:next -->\n- [ ] Utworzyć strukturę katalogów (src/, templates/, tests/)\n- [ ] Zaimplementować controller.py: zapis/walidacja PLAN.md\n- [ ] Zaimplementować flush_plan() – czyszczenie po rundzie\n- [ ] Przygotować templates/plan_template.md dla Template Engine\n- [ ] Napisać testy jednostkowe dla controller.py\n<!-- /SECTION:next -->\n\n## Done\n<!-- SECTION:done -->\n<!-- /SECTION:done -->\n\n## Blockers\n<!-- SECTION:blockers -->\n<!-- /SECTION:blockers -->\n\n## Session Log\n<!-- SECTION:session_log -->\n- session:1 | 2026-04-24 | projekt zainicjalizowany przez wizard v0.7\n<!-- /SECTION:session_log -->\n",
+      "notion_page_id": null
+    }
+  },
+  "runtime_config": {
+    "editable_during_session": [
+      "PLAN.md"
+    ],
+    "sync_frequency_per_window": 2,
+    "plan_mode_on_init": true,
+    "write_controller": "python_deterministic",
+    "subagent_mode": "fallback_only",
+    "post_round_actions": [
+      "cleanup_plan_done",
+      "migrate_entries_to_targets"
+    ],
+    "save_to_notion": true
+  }
+}
