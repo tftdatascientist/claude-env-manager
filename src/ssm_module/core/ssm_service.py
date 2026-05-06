@@ -15,7 +15,7 @@ from .logger import get_logger
 from .project_registry import ProjectEntry, ProjectRegistry
 from .project_state import ProjectSnapshot, load_snapshot
 
-MAX_PROJECTS = 4
+MAX_PROJECTS = 10
 _REGISTRY_POLL_MS = 5_000  # co ile ms sprawdzamy ~/.ssm/projects.json pod kątem nowych projektów
 
 _log = get_logger()
@@ -92,14 +92,25 @@ class SSMService(QObject):
         except Exception as exc:
             _log.warning('Błąd odświeżania snapshotu %s: %s', pid, exc)
             return
+        self._registry.touch(pid)
+        self._evict_lru()
         self.project_updated.emit(pid)
+
+    def _evict_lru(self) -> None:
+        """Odłącza watcher najstarszego projektu jeśli lista przekracza MAX_PROJECTS."""
+        if len(self._watchers) <= MAX_PROJECTS:
+            return
+        active = self._registry.all()  # posortowane last_seen desc
+        to_keep = {e.project_id for e in active[:MAX_PROJECTS]}
+        for pid in list(self._watchers.keys()):
+            if pid not in to_keep:
+                self._detach(pid)
+                _log.info('LRU evict: usunięto najstarszy projekt %s', pid)
 
     # --- Auto-wykrywanie projektów z registry (hook SessionStart) ---
 
     def _check_new_projects(self) -> None:
         """Sprawdza czy hook SessionStart dodał nowe projekty do ~/.ssm/projects.json."""
-        if len(self._watchers) >= MAX_PROJECTS:
-            return
         try:
             fresh = ProjectRegistry()
         except Exception:
@@ -108,10 +119,9 @@ class SSMService(QObject):
         for entry in fresh.all():
             if entry.project_id in known_pids:
                 continue
-            if len(self._watchers) >= MAX_PROJECTS:
-                break
             self._registry.add(entry)
             self._attach(entry)
+            self._evict_lru()
             _log.info('Auto-wykryto projekt SSS (hook): %s', entry.name or entry.project_id)
             self.project_added.emit(entry.project_id)
 
@@ -124,12 +134,10 @@ class SSMService(QObject):
         return self._snapshots.get(pid)
 
     def can_add(self) -> bool:
-        return len(self._registry.all()) < MAX_PROJECTS
+        return True
 
     def add_project(self, path: Path) -> tuple[bool, str]:
         """Dodaje projekt SSS do monitorowania. Zwraca (success, message)."""
-        if not self.can_add():
-            return False, f'Limit {MAX_PROJECTS} projektów osiągnięty'
         plan = path / 'PLAN.md'
         try:
             has_marker = plan.exists() and '<!-- SECTION:next -->' in plan.read_text(encoding='utf-8', errors='ignore')

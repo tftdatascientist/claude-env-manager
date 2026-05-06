@@ -1,0 +1,197 @@
+diff --git a/SKILL.md b/SKILL.md
+index 3510dc8..ebbc932 100644
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -135,7 +135,9 @@ python .claude/skills/sss/scripts/init_project.py --intake intake.json --target
+ Skrypt:
+ - stworzy 4 pliki startowe (CLAUDE/ARCHITECTURE/CONVENTIONS/PLAN)
+ - zainstaluje `.claude/commands/`, `.claude/hooks/`, `.claude/agents/` (jeśli nie ma — kopiuje z assets)
++- **skopiuje `SKILL.md` i `scripts/` do `.claude/skills/sss/`** — projekt staje się samowystarczalny i ścieżki w komendach slash (`.claude/skills/sss/scripts/...`) faktycznie istnieją
+ - scali `.claude/settings.local.json` z konfiguracją hooków SSS
++- bez `--force` przerywa jeśli któryś z plików startowych już istnieje (zapobiega utracie pracy)
+ - zwróci podsumowanie max 300 znaków
+ 
+ #### Krok 8: pokaż userowi wyniki
+@@ -162,7 +164,9 @@ Pracujesz nad zadaniami z `PLAN.md` sekcja `next`:
+      --content "Decyzja: użyć httpx zamiast requests bo async"
+    ```
+    Dozwolone wartości `--target`: `CLAUDE.md`, `ARCHITECTURE.md`, `CONVENTIONS.md`, `CHANGELOG.md`.
+-4. **Hook `buffer_monitor.py` automatycznie monitoruje** liczbę wpisów po każdej operacji Edit/Write na PLAN.md. Gdy bufor osiągnie 8 — ostrzega, gdy 10 — emituje STOP. Reaguj na sygnał z hooka i odpalaj `/ser`.
++4. **Sygnalizacja przepełnienia bufora — dwa źródła**:
++   - `plan_buffer.py add` po dodaniu wpisu wypisuje na stdout `[BUFFER_COUNT] N/10`. Przy ≥8 emituje `[SSS-WARN]`, przy ≥10 emituje `[SSS-STOP]`. To **primary signal** — widzisz go natychmiast w wyniku Bash.
++   - Hook `buffer_monitor.py` (PostToolUse na `Write|Edit|MultiEdit|Bash`) jest backupem — odpala się też po Edit na PLAN.md (np. ruch zadania next→current) i sprawdza bufor. Reaguj na sygnał z któregokolwiek źródła i odpalaj `/ser`.
+ 5. **Stop conditions** (kontynuacja niedozwolona):
+    - sekcja `next` w PLAN.md jest pusta
+    - user napisał stop / pauza / czekaj
+diff --git a/assets/hooks/buffer_monitor.py b/assets/hooks/buffer_monitor.py
+index ce8fe18..8b2b204 100644
+--- a/assets/hooks/buffer_monitor.py
++++ b/assets/hooks/buffer_monitor.py
+@@ -35,16 +35,32 @@ def main() -> int:
+         return 0  # cicho, bez blokady
+ 
+     tool_name = payload.get('tool_name', '')
+-    if tool_name not in ('Write', 'Edit', 'MultiEdit'):
+-        return 0
+-
+-    tool_input = payload.get('tool_input', {}) or {}
+-    file_path = tool_input.get('file_path') or tool_input.get('path') or ''
+-    if not file_path.endswith('PLAN.md'):
+-        return 0
+-
+-    plan_path = Path(file_path)
+-    if not plan_path.is_file():
++    plan_path: Path | None = None
++
++    if tool_name in ('Write', 'Edit', 'MultiEdit'):
++        # bezpośrednia edycja PLAN.md przez Claude'a
++        tool_input = payload.get('tool_input', {}) or {}
++        file_path = tool_input.get('file_path') or tool_input.get('path') or ''
++        if not file_path.endswith('PLAN.md'):
++            return 0
++        candidate = Path(file_path)
++        if not candidate.is_file():
++            return 0
++        plan_path = candidate
++
++    elif tool_name == 'Bash':
++        # zapis bufora przez plan_buffer.py — hook nie widzi tego jako Edit,
++        # więc łapiemy po nazwie skryptu w komendzie i znajdujemy PLAN.md przez cwd
++        cmd = (payload.get('tool_input', {}) or {}).get('command', '') or ''
++        if 'plan_buffer.py' not in cmd or ' add' not in cmd:
++            return 0
++        cwd = payload.get('cwd', '.') or '.'
++        candidate = Path(cwd) / 'PLAN.md'
++        if not candidate.is_file():
++            return 0
++        plan_path = candidate
++
++    else:
+         return 0
+ 
+     try:
+diff --git a/assets/hooks/prompt_length_check.py b/assets/hooks/prompt_length_check.py
+index 1d51e0c..9a28c77 100644
+--- a/assets/hooks/prompt_length_check.py
++++ b/assets/hooks/prompt_length_check.py
+@@ -47,8 +47,9 @@ def main() -> int:
+         # prompt wystarczająco długi — wyślij sygnał że można scoring odpalić
+         print(
+             f'[SSS] Wykryto opis nowego projektu ({len(prompt)} znaków, '
+-            f'≥{THRESHOLD}). Uruchom panel sędziów przez '
+-            'scripts/score_intake.py mode=score_competence przed Rundą Wstępną.'
++            f'≥{THRESHOLD}). Uruchom Rundę Wstępną SSS — szczegóły w '
++            '.claude/skills/sss/SKILL.md (sekcja "Runda Wstępna"). '
++            'Zacznij od score_intake.py --mode init, potem panel sędziów przez Task tool.'
+         )
+         return 0
+ 
+diff --git a/assets/hooks/settings.local.json b/assets/hooks/settings.local.json
+index bfcf7db..e29033b 100644
+--- a/assets/hooks/settings.local.json
++++ b/assets/hooks/settings.local.json
+@@ -2,7 +2,7 @@
+   "hooks": {
+     "PostToolUse": [
+       {
+-        "matcher": "Write|Edit|MultiEdit",
++        "matcher": "Write|Edit|MultiEdit|Bash",
+         "hooks": [
+           {
+             "type": "command",
+diff --git a/scripts/init_project.py b/scripts/init_project.py
+index 3359bf7..0bc11c5 100644
+--- a/scripts/init_project.py
++++ b/scripts/init_project.py
+@@ -54,14 +54,35 @@ def today() -> str:
+ 
+ 
+ def install_claude_dir(target: Path) -> dict:
+-    """Kopiuje commands/hooks/agents do .claude/ w projekcie + scala settings.
++    """Kopiuje commands/hooks/agents/scripts/SKILL.md do .claude/ w projekcie + scala settings.
+ 
+     Zwraca słownik z licznikami dla raportu.
+     """
+-    counts = {'commands': 0, 'hooks': 0, 'agents': 0, 'settings_merged': False}
++    counts = {
++        'commands': 0, 'hooks': 0, 'agents': 0,
++        'scripts': 0, 'skill_md': False, 'settings_merged': False,
++    }
+     claude_dir = target / '.claude'
+     claude_dir.mkdir(exist_ok=True)
+ 
++    # skills/sss/ — skopiuj SKILL.md + scripts/ żeby projekt był samowystarczalny
++    # i ścieżki ".claude/skills/sss/scripts/..." w komendach slash działały
++    skill_dst = claude_dir / 'skills' / 'sss'
++    skill_dst.mkdir(parents=True, exist_ok=True)
++
++    skill_md_src = Path(__file__).parent.parent / 'SKILL.md'
++    if skill_md_src.exists():
++        shutil.copy2(skill_md_src, skill_dst / 'SKILL.md')
++        counts['skill_md'] = True
++
++    scripts_src_dir = Path(__file__).parent  # /<skill_root>/scripts/
++    scripts_dst = skill_dst / 'scripts'
++    scripts_dst.mkdir(exist_ok=True)
++    for f in scripts_src_dir.iterdir():
++        if f.is_file() and f.suffix == '.py':
++            shutil.copy2(f, scripts_dst / f.name)
++            counts['scripts'] += 1
++
+     # commands/
+     cmd_dst = claude_dir / 'commands'
+     cmd_dst.mkdir(exist_ok=True)
+@@ -135,12 +156,24 @@ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument('--intake', required=True, help='ścieżka do intake.json')
+     ap.add_argument('--target', required=True, help='katalog projektu docelowego')
++    ap.add_argument('--force', action='store_true',
++                    help='nadpisz istniejące pliki startowe (CLAUDE/ARCHITECTURE/CONVENTIONS/PLAN)')
+     args = ap.parse_args()
+ 
+     intake = json.loads(Path(args.intake).read_text(encoding='utf-8'))
+     target = Path(args.target)
+     target.mkdir(parents=True, exist_ok=True)
+ 
++    # ZABEZPIECZENIE: bez --force nie nadpisuj plików startowych
++    if not args.force:
++        existing = [f for f in STARTUP_FILES if (target / f).exists()]
++        if existing:
++            sys.exit(
++                f'[ERR] istnieją już pliki startowe: {", ".join(existing)}\n'
++                f'      Użyj --force żeby nadpisać, albo uruchom na pustym katalogu.\n'
++                f'      Bez --force ryzykujesz utratę PLAN.md/CLAUDE.md/etc.'
++            )
++
+     project = intake.get('project', {})
+ 
+     # 1. Kopiuj szablony i wypełnij każdy plik
+@@ -214,11 +247,12 @@ def main():
+     print(f'[OK] zainicjalizowano projekt w {target}')
+     print(f'[FILES] {", ".join(STARTUP_FILES)}')
+ 
+-    # 3. Zainstaluj .claude/ (commands + hooks + agents + settings)
++    # 3. Zainstaluj .claude/ (commands + hooks + agents + scripts + SKILL.md + settings)
+     counts = install_claude_dir(target)
+     print(
+         f'[CLAUDE_DIR] commands: {counts["commands"]}, '
+         f'hooks: {counts["hooks"]}, agents: {counts["agents"]}, '
++        f'scripts: {counts["scripts"]}, skill_md: {counts["skill_md"]}, '
+         f'settings_merged: {counts["settings_merged"]}'
+     )
+ 
+diff --git a/scripts/plan_buffer.py b/scripts/plan_buffer.py
+index ff4729c..cd791d7 100644
+--- a/scripts/plan_buffer.py
++++ b/scripts/plan_buffer.py
+@@ -52,7 +52,9 @@ def cmd_add(args):
+     print(f'[OK] dodano do bufora: {args.target}')
+     print(f'[BUFFER_COUNT] {count}/10')
+     if count >= 10:
+-        print('[WARN] bufor pełny — uruchom service_round.py')
++        print('[SSS-STOP] bufor pełny (10/10) — wywołaj /ser przed kolejnymi operacjami na PLAN.md')
++    elif count >= 8:
++        print(f'[SSS-WARN] bufor zbliża się do progu ({count}/10) — rozważ /ser')
+ 
+ 
+ def cmd_count(args):

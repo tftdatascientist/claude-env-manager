@@ -18,6 +18,7 @@ build/
 BB/
 VS_CLAUDE/
 ccnsr/
+sssimp/
 
 # Projektant — może być osobnym repo
 project/

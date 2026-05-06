@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SSS Event v1",
+  "description": "Pojedynczy event w pliku SSS.jsonl projektu SSS v2",
+  "type": "object",
+  "required": ["schema_version", "event_id", "timestamp", "type", "session_id", "project_id"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "UUID4 — deduplikacja eventów"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 z timezone offset, np. 2026-05-01T15:42:00+02:00"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session_start",
+        "session_end",
+        "script_run",
+        "round_change",
+        "buffer_add",
+        "buffer_distribute",
+        "task_done",
+        "repo_finalized",
+        "ps_imported"
+      ]
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "UUID4 generowany przy starcie sesji CC — pozwala rozróżnić 2 równoległe sesje w tym samym katalogu"
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{12}$",
+      "description": "sha1(abs_path_lowercase)[:12] — stabilny identyfikator projektu"
+    },
+    "round": {
+      "type": ["string", "null"],
+      "enum": ["dev", "service", null],
+      "description": "Aktualna runda w momencie eventu"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Dane specyficzne dla danego type"
+    }
+  }
+}

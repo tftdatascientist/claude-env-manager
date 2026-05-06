@@ -84,6 +84,9 @@ try:
 except ImportError as _asus_err:
     print(f"[ASUS] panel wyłączony: {_asus_err}", file=_sys.stderr)
     AsusPanelWidget = None
+_simp_root = _Path(__file__).resolve().parents[2] / "sssimp"
+_simp_main = _simp_root / "main.py"
+_make_simp_panel = None  # SIMP uruchamia się jako osobne okno subprocess
 
 
 class MainWindow(QMainWindow):
@@ -209,6 +212,9 @@ class MainWindow(QMainWindow):
         sss_menu = menu_bar.addMenu("&SSS")
         sss_menu.addAction("&Monitor", self._show_ssm_tab)
         sss_menu.addAction("&Converter", self._show_ssc_tab)
+        if _simp_main.exists():
+            sss_menu.addSeparator()
+            sss_menu.addAction("&SIMP — Edytor skilla", self._launch_simp, "Ctrl+Shift+S")
         tools_menu.addSeparator()
         tost_menu = tools_menu.addMenu("TOST — Token Monitor")
         tost_menu.addAction("&Monitor (Dashboard + Collector)", self._tost_monitor)
@@ -397,6 +403,29 @@ class MainWindow(QMainWindow):
             self._czy_dialog = show_startup_factoid(parent=self)
         except Exception as _exc:
             print(f"[CZY] show failed: {_exc}", file=_sys.stderr)
+
+    # --- SIMP launcher ---
+
+    def _launch_simp(self) -> None:
+        import subprocess
+        venv_python = _simp_root / ".venv" / "Scripts" / "python.exe"
+        if not venv_python.exists():
+            QMessageBox.critical(
+                self, "SIMP",
+                f"Brak venv SIMP.\n\nUruchom w katalogu sssimp:\n"
+                f"python -m venv .venv\n"
+                f".venv\\Scripts\\pip install -r requirements.txt"
+            )
+            return
+        try:
+            subprocess.Popen(
+                [str(venv_python), str(_simp_main)],
+                cwd=str(_simp_root),
+                close_fds=True,
+            )
+            self._status_bar.set_status("SIMP — osobne okno uruchomione")
+        except OSError as e:
+            QMessageBox.critical(self, "SIMP", f"Nie udało się uruchomić SIMP:\n{e}")
 
     # --- WMS launcher ---
 

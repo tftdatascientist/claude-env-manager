@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 _REGISTRY_PATH = Path(os.environ.get('USERPROFILE', Path.home())) / '.ssm' / 'projects.json'
+MAX_REGISTRY_SIZE = 10
 
 AddedVia = Literal['hook', 'manual']
 
@@ -20,6 +21,7 @@ class ProjectEntry:
     added_via: AddedVia
     added_at: str = field(default_factory=lambda: datetime.now(timezone.utc).astimezone().isoformat())
     name: str = ''
+    last_seen: str = field(default_factory=lambda: datetime.now(timezone.utc).astimezone().isoformat())
 
 
 class ProjectRegistry:
@@ -34,6 +36,8 @@ class ProjectRegistry:
         try:
             data = json.loads(self._path.read_text(encoding='utf-8'))
             for item in data.get('projects', []):
+                # backwards compat: stare wpisy bez last_seen
+                item.setdefault('last_seen', item.get('added_at', datetime.now(timezone.utc).astimezone().isoformat()))
                 e = ProjectEntry(**item)
                 self._entries[e.project_id] = e
         except Exception:
@@ -41,8 +45,23 @@ class ProjectRegistry:
 
     def save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = {'projects': [asdict(e) for e in self._entries.values()]}
+        # Przytnij do MAX_REGISTRY_SIZE najnowszych (last_seen desc)
+        sorted_entries = sorted(
+            self._entries.values(),
+            key=lambda e: e.last_seen,
+            reverse=True,
+        )
+        kept = {e.project_id: e for e in sorted_entries[:MAX_REGISTRY_SIZE]}
+        self._entries = kept
+        data = {'projects': [asdict(e) for e in kept.values()]}
         self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+
+    def touch(self, project_id: str) -> None:
+        """Aktualizuje last_seen projektu (wywołaj przy każdej aktywności)."""
+        entry = self._entries.get(project_id)
+        if entry:
+            entry.last_seen = datetime.now(timezone.utc).astimezone().isoformat()
+            self.save()
 
     def add(self, entry: ProjectEntry) -> None:
         self._entries[entry.project_id] = entry
@@ -56,7 +75,8 @@ class ProjectRegistry:
         return self._entries.get(project_id)
 
     def all(self) -> list[ProjectEntry]:
-        return list(self._entries.values())
+        """Zwraca projekty posortowane: najnowsze (last_seen) pierwsze."""
+        return sorted(self._entries.values(), key=lambda e: e.last_seen, reverse=True)
 
     def find_by_path(self, path: str) -> ProjectEntry | None:
         resolved = str(Path(path).resolve())

@@ -77,6 +77,12 @@ class ProjectTab(QWidget):
 
         layout.addWidget(stats_frame)
 
+        # --- Ostatni uruchomiony skrypt ---
+        self._lbl_last_script = QLabel('')
+        self._lbl_last_script.setStyleSheet('color:#89dceb;font-size:11px;padding:2px 4px;')
+        self._lbl_last_script.hide()
+        layout.addWidget(self._lbl_last_script)
+
         # --- Bufor ---
         buf_label = QLabel('Bufor (historia wpisów):')
         buf_label.setStyleSheet('color:#89b4fa;font-weight:bold;font-size:12px;')
@@ -119,6 +125,12 @@ class ProjectTab(QWidget):
         if snap.last_event_timestamp:
             ts = snap.last_event_timestamp[:19].replace('T', ' ')
             self._lbl_last_event.setText(ts)
+
+        if snap.last_script:
+            self._lbl_last_script.setText(f'Ostatni skrypt: {snap.last_script}')
+            self._lbl_last_script.show()
+        else:
+            self._lbl_last_script.hide()
 
         # Odśwież listę bufora
         while self._buf_layout.count() > 1:

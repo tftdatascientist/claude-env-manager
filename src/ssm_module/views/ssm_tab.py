@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from ..core.ssm_service import MAX_PROJECTS, SSMService
+from ..core.project_registry import MAX_REGISTRY_SIZE
+from ..core.ssm_service import SSMService
 from .project_tab import ProjectTab
 
 
@@ -35,7 +36,7 @@ class SsmTab(QWidget):
         toolbar.addWidget(title)
         toolbar.addStretch()
 
-        self._capacity_label = QLabel(f'0 / {MAX_PROJECTS}')
+        self._capacity_label = QLabel(f'0 projektów (10 ostatnich)')
         self._capacity_label.setStyleSheet('color:#585b70;font-size:12px;margin-right:8px;')
         toolbar.addWidget(self._capacity_label)
 
@@ -55,8 +56,8 @@ class SsmTab(QWidget):
 
         self._placeholder = QLabel(
             'Brak monitorowanych projektów SSS.\n'
-            'Kliknij „+ Dodaj projekt SSS" aby dodać.\n\n'
-            f'SSM monitoruje projekty w tle gdy CM jest uruchomiony (max {MAX_PROJECTS}).'
+            'Kliknij „+ Dodaj projekt SSS" lub uruchom sesję CC w projekcie SSS.\n\n'
+            f'SSM automatycznie wykrywa projekty SSS (max {MAX_REGISTRY_SIZE} ostatnich).'
         )
         self._placeholder.setStyleSheet('color:#585b70;font-size:13px;')
         self._placeholder.setWordWrap(True)
@@ -99,12 +100,6 @@ class SsmTab(QWidget):
                 tab.apply_snapshot(snap)
 
     def _on_add_project(self) -> None:
-        if not self._service.can_add():
-            QMessageBox.warning(
-                self, 'Limit projektów',
-                f'Można monitorować maksymalnie {MAX_PROJECTS} projekty SSS jednocześnie.'
-            )
-            return
         path_str = QFileDialog.getExistingDirectory(
             self, 'Wybierz katalog projektu SSS', str(Path.home())
         )
@@ -135,6 +130,6 @@ class SsmTab(QWidget):
 
     def _sync_ui(self) -> None:
         count = self._tabs.count()
-        self._capacity_label.setText(f'{count} / {MAX_PROJECTS}')
+        self._capacity_label.setText(f'{count} projektów (10 ostatnich)')
         self._placeholder.setVisible(count == 0)
         self._tabs.setVisible(count > 0)
