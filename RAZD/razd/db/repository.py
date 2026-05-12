@@ -66,6 +66,14 @@ class DistractionEvent:
 
 
 @dataclass
+class DayStats:
+    date: str
+    uptime_s: int
+    active_s: int
+    idle_s: int
+
+
+@dataclass
 class DailyReport:
     date: str
     total_active_s: int
@@ -112,6 +120,29 @@ class DomainSummary:
     total_time_s: int
     last_seen_at: str
     browsers: str
+
+
+@dataclass
+class NotionProjectRow:
+    id: int
+    notion_page_id: str
+    name: str
+    status: str | None
+    priority: str | None
+    due_date: str | None
+    raw_properties: str  # JSON
+    synced_at: str
+
+
+@dataclass
+class FocusSessionProject:
+    id: int
+    session_id: int
+    notion_project_id: int | None
+    custom_project_name: str | None
+    notion_synced: bool
+    synced_at: str | None
+    duration_s: int
 
 
 @dataclass
@@ -414,9 +445,7 @@ class RazdRepository:
                 _parse_ts(events[i + 1].ts) if i + 1 < len(events)
                 else _parse_ts(ev.ts) + 2
             )
-            duration = min(int(next_ts - _parse_ts(ev.ts)), 120)
-            if duration <= 0:
-                continue
+            duration = max(2, min(int(next_ts - _parse_ts(ev.ts)), 120))
             if ev.event_type == "idle":
                 idle_s += duration
             else:
@@ -442,6 +471,30 @@ class RazdRepository:
             break_events=self.get_break_events_for_day(date),
             distraction_events=self.get_distraction_events_for_day(date),
         )
+
+    def compute_day_stats(self, date: str) -> DayStats:
+        events = self.get_events_for_day(date)
+        if not events:
+            return DayStats(date=date, uptime_s=0, active_s=0, idle_s=0)
+
+        first_ts = _parse_ts(events[0].ts)
+        last_ts = _parse_ts(events[-1].ts) + 2
+        uptime_s = int(last_ts - first_ts)
+
+        active_s = 0
+        idle_s = 0
+        for i, ev in enumerate(events):
+            next_ts = (
+                _parse_ts(events[i + 1].ts) if i + 1 < len(events)
+                else _parse_ts(ev.ts) + 2
+            )
+            duration = max(2, min(int(next_ts - _parse_ts(ev.ts)), 120))
+            if ev.event_type == "idle":
+                idle_s += duration
+            else:
+                active_s += duration
+
+        return DayStats(date=date, uptime_s=uptime_s, active_s=active_s, idle_s=idle_s)
 
     # --- Web visits ---
 
@@ -566,8 +619,265 @@ class RazdRepository:
             for r in rows
         ]
 
+    # --- Notion projects ---
+
+    def upsert_notion_project(
+        self,
+        notion_page_id: str,
+        name: str,
+        status: str | None,
+        priority: str | None,
+        due_date: str | None,
+        raw_properties: str,
+    ) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO notion_projects"
+            " (notion_page_id, name, status, priority, due_date, raw_properties, synced_at)"
+            " VALUES (?,?,?,?,?,?, datetime('now'))"
+            " ON CONFLICT(notion_page_id) DO UPDATE SET"
+            "  name=excluded.name,"
+            "  status=excluded.status,"
+            "  priority=excluded.priority,"
+            "  due_date=excluded.due_date,"
+            "  raw_properties=excluded.raw_properties,"
+            "  synced_at=excluded.synced_at"
+            " RETURNING id",
+            (notion_page_id, name, status, priority, due_date, raw_properties),
+        )
+        row = cur.fetchone()
+        self._conn.commit()
+        return row["id"]
+
+    def list_notion_projects(self, active_only: bool = True) -> list[NotionProjectRow]:
+        rows = self._conn.execute(
+            "SELECT id, notion_page_id, name, status, priority, due_date, raw_properties, synced_at"
+            " FROM notion_projects ORDER BY name"
+        ).fetchall()
+        projects = [_row_to_notion_project(r) for r in rows]
+        if active_only:
+            done_statuses = {
+                "done", "cancel", "archiwum", "zakończony", "completed",
+                "archived", "cancelled", "anulowany", "zarchiwizowany", "finished",
+            }
+            projects = [p for p in projects if not p.status or p.status.lower() not in done_statuses]
+        return projects
+
+    def get_notion_project_by_page_id(self, notion_page_id: str) -> NotionProjectRow | None:
+        row = self._conn.execute(
+            "SELECT id, notion_page_id, name, status, priority, due_date, raw_properties, synced_at"
+            " FROM notion_projects WHERE notion_page_id=?",
+            (notion_page_id,),
+        ).fetchone()
+        return _row_to_notion_project(row) if row else None
+
+    def get_notion_project_by_id(self, project_id: int) -> NotionProjectRow | None:
+        row = self._conn.execute(
+            "SELECT id, notion_page_id, name, status, priority, due_date, raw_properties, synced_at"
+            " FROM notion_projects WHERE id=?",
+            (project_id,),
+        ).fetchone()
+        return _row_to_notion_project(row) if row else None
+
+    def link_focus_session_project(
+        self,
+        session_id: int,
+        notion_project_id: int | None,
+        custom_project_name: str | None,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO focus_session_project(session_id, notion_project_id, custom_project_name)"
+            " VALUES(?,?,?)"
+            " ON CONFLICT(session_id) DO UPDATE SET"
+            "  notion_project_id=excluded.notion_project_id,"
+            "  custom_project_name=excluded.custom_project_name",
+            (session_id, notion_project_id, custom_project_name),
+        )
+        self._conn.commit()
+
+    def mark_session_project_synced(self, session_id: int) -> None:
+        self._conn.execute(
+            "UPDATE focus_session_project SET notion_synced=1, synced_at=datetime('now')"
+            " WHERE session_id=?",
+            (session_id,),
+        )
+        self._conn.commit()
+
+    def get_unsynced_session_projects(self) -> list[FocusSessionProject]:
+        rows = self._conn.execute(
+            "SELECT fsp.id, fsp.session_id, fsp.notion_project_id, fsp.custom_project_name,"
+            "  fsp.notion_synced, fsp.synced_at,"
+            "  fs.duration_s"
+            " FROM focus_session_project fsp"
+            " JOIN focus_sessions fs ON fs.id = fsp.session_id"
+            " WHERE fsp.notion_synced=0 AND fsp.notion_project_id IS NOT NULL"
+            "  AND fs.ended_at IS NOT NULL"
+        ).fetchall()
+        return [_row_to_fsp(r) for r in rows]
+
+    def get_session_project(self, session_id: int) -> FocusSessionProject | None:
+        row = self._conn.execute(
+            "SELECT fsp.id, fsp.session_id, fsp.notion_project_id, fsp.custom_project_name,"
+            "  fsp.notion_synced, fsp.synced_at,"
+            "  fs.duration_s"
+            " FROM focus_session_project fsp"
+            " JOIN focus_sessions fs ON fs.id = fsp.session_id"
+            " WHERE fsp.session_id=?",
+            (session_id,),
+        ).fetchone()
+        return _row_to_fsp(row) if row else None
+
+    # ------------------------------------------------------------------ pinned
+
+    def get_pinned_projects(self) -> list[tuple[int, NotionProjectRow, str]]:
+        """Zwraca [(slot, project_row, color)] posortowane wg slotu."""
+        rows = self._conn.execute(
+            "SELECT pp.slot, pp.color,"
+            " np.id, np.notion_page_id, np.name, np.status, np.priority, np.due_date,"
+            " np.raw_properties, np.synced_at"
+            " FROM pinned_projects pp"
+            " JOIN notion_projects np ON np.id = pp.project_id"
+            " ORDER BY pp.slot"
+        ).fetchall()
+        result = []
+        for r in rows:
+            proj = NotionProjectRow(
+                id=r["id"], notion_page_id=r["notion_page_id"], name=r["name"],
+                status=r["status"], priority=r["priority"], due_date=r["due_date"],
+                raw_properties=r["raw_properties"], synced_at=r["synced_at"],
+            )
+            result.append((r["slot"], proj, r["color"]))
+        return result
+
+    def set_pinned_project(self, slot: int, project_id: int, color: str) -> None:
+        """Przypina projekt do slotu 1–4."""
+        self._conn.execute(
+            "INSERT INTO pinned_projects(slot, project_id, color) VALUES(?,?,?)"
+            " ON CONFLICT(slot) DO UPDATE SET project_id=excluded.project_id, color=excluded.color",
+            (slot, project_id, color),
+        )
+        self._conn.commit()
+
+    def clear_pinned_slot(self, slot: int) -> None:
+        self._conn.execute("DELETE FROM pinned_projects WHERE slot=?", (slot,))
+        self._conn.commit()
+
+    # ------------------------------------------------------------------ tasks
+
+    def upsert_task(self, notion_page_id: str, title: str, status: str,
+                    deadline: str | None, details: str | None,
+                    project_page_id: str | None) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO notion_tasks"
+            " (notion_page_id, title, status, deadline, details, project_page_id, synced_at, dirty)"
+            " VALUES (?,?,?,?,?,?, datetime('now'), 0)"
+            " ON CONFLICT(notion_page_id) DO UPDATE SET"
+            "  title=excluded.title, status=excluded.status, deadline=excluded.deadline,"
+            "  details=excluded.details, project_page_id=excluded.project_page_id,"
+            "  synced_at=excluded.synced_at, dirty=0"
+            " RETURNING id",
+            (notion_page_id, title, status, deadline, details, project_page_id),
+        )
+        self._conn.commit()
+        return cur.fetchone()["id"]
+
+    def list_tasks_for_project(self, project_page_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, notion_page_id, title, status, deadline, details, synced_at, dirty"
+            " FROM notion_tasks WHERE project_page_id=?"
+            " ORDER BY CASE status"
+            "  WHEN 'Not started' THEN 0 WHEN 'In progress' THEN 1 ELSE 2 END, deadline NULLS LAST, title",
+            (project_page_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_task_status_local(self, notion_page_id: str, status: str) -> None:
+        self._conn.execute(
+            "UPDATE notion_tasks SET status=?, dirty=1 WHERE notion_page_id=?",
+            (status, notion_page_id),
+        )
+        self._conn.commit()
+
+    def update_task_fields_local(self, notion_page_id: str,
+                                title: str | None = None,
+                                deadline: str | None = ...,  # type: ignore[assignment]
+                                details: str | None = ...) -> None:  # type: ignore[assignment]
+        parts, vals = [], []
+        if title is not None:
+            parts.append("title=?"); vals.append(title)
+        if deadline is not ...:
+            parts.append("deadline=?"); vals.append(deadline)
+        if details is not ...:
+            parts.append("details=?"); vals.append(details)
+        if not parts:
+            return
+        parts.append("dirty=1")
+        vals.append(notion_page_id)
+        self._conn.execute(
+            f"UPDATE notion_tasks SET {', '.join(parts)} WHERE notion_page_id=?", vals
+        )
+        self._conn.commit()
+
+    def mark_task_clean(self, notion_page_id: str) -> None:
+        self._conn.execute(
+            "UPDATE notion_tasks SET dirty=0, synced_at=datetime('now') WHERE notion_page_id=?",
+            (notion_page_id,),
+        )
+        self._conn.commit()
+
+    def delete_task_local(self, notion_page_id: str) -> None:
+        self._conn.execute("DELETE FROM notion_tasks WHERE notion_page_id=?", (notion_page_id,))
+        self._conn.commit()
+
+    def insert_task_local(self, notion_page_id: str, title: str, status: str,
+                          deadline: str | None, details: str | None,
+                          project_page_id: str | None) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO notion_tasks"
+            " (notion_page_id, title, status, deadline, details, project_page_id, synced_at, dirty)"
+            " VALUES (?,?,?,?,?,?, datetime('now'), 0)",
+            (notion_page_id, title, status, deadline, details, project_page_id),
+        )
+        self._conn.commit()
+
+    def get_project_time_stats(self, project_id: int) -> dict[str, int]:
+        """Zwraca {date_str: duration_s} dla wszystkich sesji projektu."""
+        rows = self._conn.execute(
+            "SELECT date(fs.started_at) AS d, SUM(fs.duration_s) AS total"
+            " FROM focus_session_project fsp"
+            " JOIN focus_sessions fs ON fs.id = fsp.session_id"
+            " WHERE fsp.notion_project_id=? AND fs.ended_at IS NOT NULL"
+            " GROUP BY d ORDER BY d",
+            (project_id,),
+        ).fetchall()
+        return {r["d"]: r["total"] for r in rows}
+
     def close(self) -> None:
         self._conn.close()
+
+
+def _row_to_notion_project(row: sqlite3.Row) -> NotionProjectRow:
+    return NotionProjectRow(
+        id=row["id"],
+        notion_page_id=row["notion_page_id"],
+        name=row["name"],
+        status=row["status"],
+        priority=row["priority"],
+        due_date=row["due_date"],
+        raw_properties=row["raw_properties"],
+        synced_at=row["synced_at"],
+    )
+
+
+def _row_to_fsp(row: sqlite3.Row) -> FocusSessionProject:
+    return FocusSessionProject(
+        id=row["id"],
+        session_id=row["session_id"],
+        notion_project_id=row["notion_project_id"],
+        custom_project_name=row["custom_project_name"],
+        notion_synced=bool(row["notion_synced"]),
+        synced_at=row["synced_at"],
+        duration_s=row["duration_s"],
+    )
 
 
 _DEV_TOOL_NAMES = frozenset({

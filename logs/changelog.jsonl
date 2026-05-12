@@ -3,3 +3,6 @@
 {"ts": "2026-04-25 20:10", "file": "CLAUDE.md", "section": "Stack", "action": "dodano", "preview": "Python 3.13 · PySide6 (Qt6) · watchdog · pytest · pywin32"}
 {"ts": "2026-04-25 20:10", "file": "CLAUDE.md", "section": "Uruchomienie", "action": "dodano", "preview": "```bash .venv/Scripts/python.exe main.py          # aplikacja .venv/Scripts/pyth"}
 {"ts": "2026-04-25 20:10", "file": "CLAUDE.md", "section": "Zasady kodowania", "action": "dodano", "preview": "- Python 3.12+ z type hints, PEP 8, max line 120 - `pathlib.Path` wszedzie; scie"}
+{"ts": "2026-05-07 00:18", "file": "CLAUDE.md", "section": "Dokumentacja — gdzie szukac", "action": "zmieniono", "preview": "| Dokument | Zawiera | | `docs/ARCHITECTURE.md` | Struktura katalogow, lista mod"}
+{"ts": "2026-05-07 00:18", "file": "CLAUDE.md", "section": "Podprojekty zagnieżdżone (IZOLOWANE)", "action": "zmieniono", "preview": "Poniższe foldery to **osobne projekty** z własnym CLAUDE.md i własnym kontekstem"}
+{"ts": "2026-05-07 00:18", "file": "CLAUDE.md", "section": "Uruchomienie", "action": "zmieniono", "preview": "```bash .venv/Scripts/python.exe main.py          # aplikacja .venv/Scripts/pyth"}

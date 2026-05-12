@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QFileSystemWatcher, QProcess, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor
+from PySide6.QtGui import QColor, QFont, QPainter, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QTextEdit,
     QScrollArea,
     QSizePolicy,
@@ -35,6 +38,8 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTabBar,
     QTabWidget,
+    QToolButton,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -68,6 +73,7 @@ from src.projektant.template_parser import (
 )
 from src.utils.plan_parser import PlanData, get_section, read_plan, write_plan
 from src.ui.prompt_score_panel import PromptScorePanel as _PromptScorePanel
+from src.ui.clean_clear_panel import CleanClearPanel as _CleanClearPanel
 from src.workflow import WorkflowRunner
 
 # SSS Module — lazy import żeby nie blokować startu CM jeśli moduł nie istnieje
@@ -104,9 +110,10 @@ from src.watchers.session_watcher import (
     read_transcript_messages,
     read_transcript_tail,
 )
+from src.ui.projektant_panel import ExplorerSection, ReadmeSection, ChangelogSection
 
-SLOT_COLORS = ["#2dd4bf", "#f97316", "#a78bfa", "#ef4444"]
-SLOT_NAMES = ["Projekt 1", "Projekt 2", "Projekt 3", "Projekt 4"]
+SLOT_COLORS = ["#2dd4bf", "#f97316", "#a78bfa", "#ef4444", "#8b8fa8", "#6e7288"]
+SLOT_NAMES = ["Projekt 1", "Projekt 2", "Projekt 3", "Projekt 4", "Podgląd L", "Podgląd P"]
 
 _FONT_MONO = QFont("Consolas", 9)
 _FONT_SMALL = QFont("Segoe UI", 9)
@@ -515,6 +522,12 @@ class ProjectSlotWidget(QWidget):
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(4)
 
+        # Niewidoczne labele do trzymania danych snapshot (używane przez update_snapshot)
+        self._lbl_phase = QLabel()
+        self._lbl_model_live = QLabel()
+        self._lbl_cost = QLabel()
+        self._lbl_ctx = QLabel()
+
         self._status_bar = _StatusBar(self._color)
         root.addWidget(self._status_bar)
 
@@ -546,223 +559,665 @@ class ProjectSlotWidget(QWidget):
         """)
         root.addWidget(self._tabs, stretch=1)
 
-        self._tabs.addTab(self._build_dane(), "Config")         # 0
-        self._tabs.addTab(self._build_ssm(), "Monitor")          # 1
-        self._tabs.addTab(self._build_historia_sesje_vibe(), "Historia")  # 2
-        self._tabs.addTab(self._build_plan(), "ZADANIA")         # 3
-        self._tabs.addTab(self._build_prompt_score(), "Prompt Score")  # 4
-        self._tabs.addTab(self._build_pcc(), "PLAN.md")          # 5
+        self._tabs.addTab(self._build_config_monitor(), "Config")   # 0
+        self._tabs.addTab(self._build_historia_logi(), "Historia")  # 1
+        self._tabs.addTab(self._build_plan(), "ZADANIA")             # 2
+        self._tabs.addTab(self._build_pcc(), "PLAN.md")              # 3
         self._tabs.addTab(self._build_md_file("CLAUDE.md"), "CLAUDE.md")
         self._tabs.addTab(self._build_md_file("ARCHITECTURE.md"), "ARCHITECTURE.md")
         self._tabs.addTab(self._build_md_file("CONVENTIONS.md"), "CONVENTIONS.md")
-        self._tabs.addTab(self._build_logi(), "Logi")
         self._tabs.addTab(self._build_full_converter(), "Full Converter")
+        self._clean_clear = _CleanClearPanel(slot_color=self._color)
+        self._tabs.addTab(self._clean_clear, "CleanClear")
+        self._tabs.addTab(self._build_prompt_score(), "Prompt Score")
+
+        self._explorer_section = ExplorerSection()
+        self._tabs.addTab(self._explorer_section, "Explorer")
+
+        self._readme_section = ReadmeSection()
+        self._tabs.addTab(self._readme_section, "README.md")
+
+        self._changelog_section = ChangelogSection()
+        self._tabs.addTab(self._changelog_section, "CHANGELOG.md")
 
         root.addWidget(_sep())
         root.addWidget(self._build_action_bar())
 
     # ---- Dane ---------------------------------------------------------- #
 
-    def _build_dane(self) -> QWidget:
-        """Układ poziomy: ścieżka u góry + 2×2 grid kart poniżej (bez scrolla)."""
-        w = QWidget()
-        outer = QVBoxLayout(w)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(8)
+    # ─────────────────────────────────────────────────────────────────────── #
+    # Złożone zakładki (Config+Monitor, Historia+Logi)                        #
+    # ─────────────────────────────────────────────────────────────────────── #
 
-        # ── Ścieżka projektu (cała szerokość) ──────────────────────────
-        outer.addWidget(QLabel("Ścieżka projektu", styleSheet=_LBL_HEAD))
-        path_row = QHBoxLayout()
+    def _build_config_monitor(self) -> QWidget:
+        """Zewnętrzna zakładka 'Config' z wewnętrznym QTabWidget [Config][Monitor]."""
+        inner = QTabWidget()
+        inner.setDocumentMode(True)
+        c = self._color
+        inner.setStyleSheet(f"""
+            QTabBar::tab {{
+                background: {c}55;
+                color: #0a0a0a;
+                font-size: 10px;
+                padding: 3px 10px;
+                border: none;
+                margin-right: 1px;
+                border-radius: 2px 2px 0 0;
+            }}
+            QTabBar::tab:selected {{
+                background: {c}99;
+                color: #000000;
+            }}
+            QTabBar::tab:hover:!selected {{
+                background: {c}77;
+            }}
+        """)
+        inner.addTab(self._build_dane(), "Config")
+        self._monitor_placeholder = self._build_ssm()
+        inner.addTab(self._monitor_placeholder, "Monitor")
+        self._inner_config_tabs = inner
+        return inner
+
+    def set_monitor_widget(self, mv: QWidget) -> None:
+        """Podmienia zakładkę Monitor w wewnętrznym QTabWidget Config+Monitor."""
+        inner = self._inner_config_tabs
+        inner.removeTab(1)
+        inner.insertTab(1, mv, "Monitor")
+
+    def _build_historia_logi(self) -> QWidget:
+        """Zewnętrzna zakładka 'Historia' z wewnętrznym QTabWidget [Historia][Logi]."""
+        inner = QTabWidget()
+        inner.setDocumentMode(True)
+        c = self._color
+        inner.setStyleSheet(f"""
+            QTabBar::tab {{
+                background: {c}55;
+                color: #0a0a0a;
+                font-size: 10px;
+                padding: 3px 10px;
+                border: none;
+                margin-right: 1px;
+                border-radius: 2px 2px 0 0;
+            }}
+            QTabBar::tab:selected {{
+                background: {c}99;
+                color: #000000;
+            }}
+            QTabBar::tab:hover:!selected {{
+                background: {c}77;
+            }}
+        """)
+        inner.addTab(self._build_historia_sesje_vibe(), "Historia")
+        inner.addTab(self._build_logi(), "Logi")
+        return inner
+
+    # ─────────────────────────────────────────────────────────────────────── #
+
+    def _build_dane(self) -> QWidget:
+        w = QWidget()
+        root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(2)
+        splitter.setStyleSheet("QSplitter::handle{background:#2a2a2a;}")
+
+        # ── helpers ───────────────────────────────────────────────────
+        def _row(key: str, widget: QWidget, key_w: int = 120) -> QHBoxLayout:
+            r = QHBoxLayout()
+            r.setSpacing(6)
+            lbl = QLabel(key, styleSheet=_LBL_KEY)
+            lbl.setFixedWidth(key_w)
+            r.addWidget(lbl)
+            r.addWidget(widget, stretch=1)
+            return r
+
+        def _sep() -> QFrame:
+            f = QFrame()
+            f.setFrameShape(QFrame.Shape.HLine)
+            f.setStyleSheet("QFrame{color:#2a2a2a;margin:2px 0;}")
+            return f
+
+        # ══ LEWA KOLUMNA ══════════════════════════════════════════════
+        left = QWidget()
+        llay = QVBoxLayout(left)
+        llay.setContentsMargins(10, 10, 6, 10)
+        llay.setSpacing(5)
+
+        # ── Ścieżka ───────────────────────────────────────────────────
         self._path_edit = QPlainTextEdit()
-        self._path_edit.setFixedHeight(34)
+        self._path_edit.setFixedHeight(30)
         self._path_edit.setFont(_FONT_MONO)
         self._path_edit.setPlaceholderText("C:\\Projekty\\moj-projekt")
-        path_row.addWidget(self._path_edit)
         self._btn_browse = QPushButton("…")
-        self._btn_browse.setFixedWidth(30)
+        self._btn_browse.setFixedWidth(26)
         self._btn_browse.setStyleSheet(_BTN)
+        path_row = QHBoxLayout()
+        path_row.setSpacing(4)
+        path_lbl = QLabel("Ścieżka:", styleSheet=_LBL_KEY)
+        path_lbl.setFixedWidth(120)
+        path_row.addWidget(path_lbl)
+        path_row.addWidget(self._path_edit, stretch=1)
         path_row.addWidget(self._btn_browse)
-        outer.addLayout(path_row)
+        llay.addLayout(path_row)
 
-        # ── Grid 2×2: Konfiguracja | Stan sesji // Statystyki | Kluczowe pliki ──
-        from PySide6.QtWidgets import QGridLayout
-        grid = QGridLayout()
-        grid.setSpacing(8)
-        grid.setContentsMargins(0, 4, 0, 0)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        grid.setRowStretch(0, 0)
-        grid.setRowStretch(1, 1)
+        llay.addWidget(_sep())
 
-        # ── (0,0) Konfiguracja startowa ───────────────────────────────
-        konfig = QFrame()
-        konfig.setStyleSheet(_CARD)
-        kl = QVBoxLayout(konfig)
-        kl.setContentsMargins(8, 6, 8, 6)
-        kl.setSpacing(4)
-        kl.addWidget(QLabel("Konfiguracja startowa", styleSheet=_LBL_HEAD))
-
+        # ── Model / Effort / Uprawnienia ──────────────────────────────
         self._model_combo = QComboBox()
         self._model_combo.addItems(CC_MODELS)
         self._model_combo.setFont(_FONT_MONO)
-        kl.addLayout(_kv_row("Model:", self._model_combo))
+        llay.addLayout(_row("Model:", self._model_combo))
 
         self._effort_combo = QComboBox()
         self._effort_combo.addItems(CC_EFFORTS)
         self._effort_combo.setFont(_FONT_MONO)
-        kl.addLayout(_kv_row("Effort:", self._effort_combo))
+        llay.addLayout(_row("Effort:", self._effort_combo))
 
         self._perm_combo = QComboBox()
         self._perm_combo.addItems(list(CC_PERMISSION_MODES.keys()))
         self._perm_combo.setFont(_FONT_MONO)
-        kl.addLayout(_kv_row("Uprawnienia:", self._perm_combo))
-        kl.addStretch()
-        grid.addWidget(konfig, 0, 0)
+        llay.addLayout(_row("Uprawnienia:", self._perm_combo))
 
-        # ── (0,1) Statystyki projektu ─────────────────────────────────
-        stats = QFrame()
-        stats.setStyleSheet(_CARD)
-        stl = QVBoxLayout(stats)
-        stl.setContentsMargins(8, 6, 8, 6)
-        stl.setSpacing(2)
+        # ── Tryb sesji ────────────────────────────────────────────────
+        self._session_mode_group = QButtonGroup(self)
+        session_widget = QWidget()
+        session_inner = QHBoxLayout(session_widget)
+        session_inner.setContentsMargins(0, 0, 0, 0)
+        session_inner.setSpacing(10)
+        for i, (label, tip) in enumerate([
+            ("Nowa",      "Zawsze startuje nową sesję CC w projekcie"),
+            ("Wznów",     "--resume: wznawia ostatnią przerwaną sesję (zachowuje kontekst)"),
+            ("Kontynuuj", "--continue: kontynuuje ostatnią rozmowę bez interakcji użytkownika"),
+        ]):
+            rb = QRadioButton(label)
+            rb.setStyleSheet("color:#cccccc;font-size:10px;")
+            rb.setToolTip(tip)
+            self._session_mode_group.addButton(rb, i)
+            session_inner.addWidget(rb)
+            if i == 0:
+                rb.setChecked(True)
+        session_inner.addStretch()
+        llay.addLayout(_row("Tryb sesji:", session_widget))
+
+        # ── Opcje ────────────────────────────────────────────────────
+        self._chk_verbose = QCheckBox("Verbose  (--verbose)")
+        self._chk_verbose.setStyleSheet("color:#cccccc;font-size:10px;")
+        self._chk_verbose.setToolTip("--verbose — szczegółowe logi CC w terminalu.")
+        self._chk_no_update = QCheckBox("Bez aktualizacji  (--no-update-check)")
+        self._chk_no_update.setStyleSheet("color:#cccccc;font-size:10px;")
+        self._chk_no_update.setToolTip("--no-update-check — pomija sprawdzanie aktualizacji, przyspiesza start.")
+        self._chk_no_flicker = QCheckBox("No Flicker  (CLAUDE_CODE_NO_FLICKER=1)")
+        self._chk_no_flicker.setStyleSheet("color:#cccccc;font-size:10px;")
+        self._chk_no_flicker.setToolTip(
+            "Ustawia CLAUDE_CODE_NO_FLICKER=1 w środowisku terminala.\n"
+            "Eliminuje migotanie przy starcie CC w VS Code."
+        )
+        self._chk_focus = QCheckBox("/focus  (prompt startowy)")
+        self._chk_focus.setStyleSheet("color:#cccccc;font-size:10px;")
+        self._chk_focus.setToolTip(
+            "Dodaje /focus na początku promptu startowego.\n"
+            "Wymusza tryb skupienia w CC po uruchomieniu."
+        )
+        opts_widget = QWidget()
+        opts_inner = QHBoxLayout(opts_widget)
+        opts_inner.setContentsMargins(0, 0, 0, 0)
+        opts_inner.setSpacing(14)
+        opts_inner.addWidget(self._chk_verbose)
+        opts_inner.addWidget(self._chk_no_update)
+        opts_inner.addWidget(self._chk_no_flicker)
+        opts_inner.addWidget(self._chk_focus)
+        opts_inner.addStretch()
+        llay.addLayout(_row("Opcje:", opts_widget))
+
+        llay.addWidget(_sep())
+
+        # ── Komenda przed CC ──────────────────────────────────────────
+        self._pre_cmd_edit = QPlainTextEdit()
+        self._pre_cmd_edit.setFixedHeight(30)
+        self._pre_cmd_edit.setFont(_FONT_MONO)
+        self._pre_cmd_edit.setPlaceholderText("np. & \".venv\\Scripts\\Activate.ps1\"")
+        self._pre_cmd_edit.setToolTip(
+            "Wykonywana w terminalu zanim zostanie wywołane cc.\n"
+            "Sekwencja: [ta komenda] → cc [flagi] → [prompt]"
+        )
+        llay.addLayout(_row("Przed CC:", self._pre_cmd_edit))
+
+        # ── Dodatkowe flagi ───────────────────────────────────────────
+        self._cc_flags_edit = QPlainTextEdit()
+        self._cc_flags_edit.setFixedHeight(30)
+        self._cc_flags_edit.setFont(_FONT_MONO)
+        self._cc_flags_edit.setPlaceholderText("np. --add-dir C:\\Shared  lub  --output-format stream-json")
+        self._cc_flags_edit.setToolTip(
+            "Dodatkowe flagi CLI dla cc — trafiają za Model/Effort/Uprawnienia/Tryb.\n"
+            "Przykłady: --add-dir /ścieżka   --output-format stream-json"
+        )
+        llay.addLayout(_row("Flagi CC:", self._cc_flags_edit))
+
+        llay.addWidget(_sep())
+
+        # ── Prompt startowy ───────────────────────────────────────────
+        prompt_hdr = QHBoxLayout()
+        prompt_hdr.addWidget(QLabel("Prompt startowy:", styleSheet=_LBL_KEY))
+        prompt_hdr.addStretch()
+        btn_reset = QPushButton("Resetuj")
+        btn_reset.setStyleSheet(_BTN)
+        btn_reset.setFixedWidth(60)
+        btn_reset.clicked.connect(lambda: self._vibe_edit.setPlainText(DEFAULT_VIBE_PROMPT))
+        btn_copy = QPushButton("Kopiuj")
+        btn_copy.setStyleSheet(_BTN)
+        btn_copy.setFixedWidth(52)
+        btn_copy.clicked.connect(lambda: QApplication.clipboard().setText(self._vibe_edit.toPlainText()))
+        prompt_hdr.addWidget(btn_reset)
+        prompt_hdr.addWidget(btn_copy)
+        llay.addLayout(prompt_hdr)
+
+        self._vibe_edit = QPlainTextEdit()
+        self._vibe_edit.setFont(_FONT_MONO)
+        self._vibe_edit.setPlaceholderText(DEFAULT_VIBE_PROMPT)
+        llay.addWidget(self._vibe_edit, stretch=1)
+
+        # ══ PRAWA KOLUMNA — Statystyki ════════════════════════════════
+        right = QWidget()
+        rlay = QVBoxLayout(right)
+        rlay.setContentsMargins(6, 10, 10, 10)
+        rlay.setSpacing(5)
+
         stats_hdr = QHBoxLayout()
         stats_hdr.addWidget(QLabel("Statystyki projektu", styleSheet=_LBL_HEAD))
         stats_hdr.addStretch()
         self._btn_stats_refresh = QPushButton("⟳")
-        self._btn_stats_refresh.setFixedWidth(28)
+        self._btn_stats_refresh.setFixedWidth(26)
         self._btn_stats_refresh.setStyleSheet(_BTN)
         stats_hdr.addWidget(self._btn_stats_refresh)
-        stl.addLayout(stats_hdr)
+        rlay.addLayout(stats_hdr)
+
+        rlay.addWidget(_sep())
 
         self._lbl_files = _val()
         self._lbl_size = _val()
         self._lbl_git = _val()
         self._lbl_git_url = _val()
         self._lbl_branch = _val()
-        stl.addLayout(_kv_row("Pliki/foldery:", self._lbl_files))
-        stl.addLayout(_kv_row("Rozmiar:", self._lbl_size))
-        stl.addLayout(_kv_row("Git:", self._lbl_git))
-        stl.addLayout(_kv_row("Remote:", self._lbl_git_url))
-        stl.addLayout(_kv_row("Gałąź:", self._lbl_branch))
-        stl.addStretch()
-        grid.addWidget(stats, 0, 1)
+        for key, lbl in [
+            ("Pliki/foldery:", self._lbl_files),
+            ("Rozmiar:", self._lbl_size),
+            ("Git:", self._lbl_git),
+            ("Remote:", self._lbl_git_url),
+            ("Gałąź:", self._lbl_branch),
+        ]:
+            rlay.addLayout(_row(key, lbl, key_w=100))
 
-        # ── (1,0-1) Kluczowe pliki projektu (cała szerokość) ──────────
-        kfiles = QFrame()
-        kfiles.setStyleSheet(_CARD)
-        kfl = QVBoxLayout(kfiles)
-        kfl.setContentsMargins(8, 6, 8, 6)
-        kfl.setSpacing(2)
-        kfl.addWidget(QLabel("Kluczowe pliki projektu", styleSheet=_LBL_HEAD))
-        self._key_file_labels: dict[str, QLabel] = {}
-        from src.cc_launcher.project_stats import KEY_FILES
-        for fname in KEY_FILES:
-            lbl = _val("—", _LBL_DIM)
-            self._key_file_labels[fname] = lbl
-            kfl.addLayout(_kv_row(fname + ":", lbl))
-        kfl.addStretch()
-        grid.addWidget(kfiles, 1, 0, 1, 2)
+        rlay.addStretch()
 
-        outer.addLayout(grid, stretch=2)
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setSizes([600, 300])
 
-        # ── Separator ─────────────────────────────────────────────────
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("QFrame{color:#2a2a2a;}")
-        outer.addWidget(sep)
-
-        # ── Komenda przed CC (np. aktywacja venv) ─────────────────────
-        outer.addWidget(QLabel(
-            "Komenda przed CC (wykonywana w terminalu przed startem CC):",
-            styleSheet=_LBL_KEY,
-            wordWrap=True,
-        ))
-        self._pre_cmd_edit = QPlainTextEdit()
-        self._pre_cmd_edit.setFixedHeight(44)
-        self._pre_cmd_edit.setFont(_FONT_MONO)
-        self._pre_cmd_edit.setPlaceholderText(
-            "np. Set-ExecutionPolicy RemoteSigned -Scope Process; & \".venv\\Scripts\\Activate.ps1\""
-        )
-        outer.addWidget(self._pre_cmd_edit)
-
-        # ── Prompt wklejany do terminala CC ───────────────────────────
-        outer.addWidget(QLabel(
-            "Prompt wklejany do terminala CC przy uruchomieniu sesji:",
-            styleSheet=_LBL_KEY,
-            wordWrap=True,
-        ))
-        self._vibe_edit = QPlainTextEdit()
-        self._vibe_edit.setFont(_FONT_MONO)
-        self._vibe_edit.setPlaceholderText(DEFAULT_VIBE_PROMPT)
-        outer.addWidget(self._vibe_edit, stretch=1)
-
-        btns_vibe = QHBoxLayout()
-        btn_reset = QPushButton("Resetuj do domyślnego")
-        btn_reset.setStyleSheet(_BTN)
-        btn_reset.clicked.connect(lambda: self._vibe_edit.setPlainText(DEFAULT_VIBE_PROMPT))
-        btn_copy = QPushButton("Kopiuj do schowka")
-        btn_copy.setStyleSheet(_BTN)
-        btn_copy.clicked.connect(
-            lambda: QApplication.clipboard().setText(self._vibe_edit.toPlainText())
-        )
-        btns_vibe.addWidget(btn_reset)
-        btns_vibe.addWidget(btn_copy)
-        btns_vibe.addStretch()
-        outer.addLayout(btns_vibe)
-
+        root.addWidget(splitter)
         return w
 
     # ---- PLAN ---------------------------------------------------------- #
 
+    # ---- ZADANIA -------------------------------------------------------- #
+
     def _build_plan(self) -> QWidget:
+        """Zakładka ZADANIA — generowanie zadań do PLAN.md przez CC."""
         w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(4)
+        root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        top = QHBoxLayout()
-        self._lbl_plan_path = QLabel("", styleSheet=_LBL_DIM)
-        self._lbl_plan_path.setFont(_FONT_MONO)
-        top.addWidget(self._lbl_plan_path, stretch=1)
-        self._btn_plan_refresh = QPushButton("Odśwież")
-        self._btn_plan_refresh.setStyleSheet(_BTN)
-        self._btn_plan_save = QPushButton("Zapisz")
-        self._btn_plan_save.setStyleSheet(_BTN)
-        self._btn_plan_save.setEnabled(False)
-        top.addWidget(self._btn_plan_refresh)
-        top.addWidget(self._btn_plan_save)
-        lay.addLayout(top)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(2)
+        splitter.setStyleSheet("QSplitter::handle{background:#2a2a2a;}")
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        # ══ LEWA: Opis zamierzenia + kontrolki ════════════════════════
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(10, 10, 6, 10)
+        ll.setSpacing(6)
 
-        self._plan_editor = QPlainTextEdit()
-        self._plan_editor.setFont(_FONT_MONO)
-        self._plan_editor.setPlaceholderText(
-            "Brak pliku PLAN.md lub nie ustawiono ścieżki projektu."
+        ll.addWidget(QLabel(
+            "Opisz co chcesz osiągnąć:",
+            styleSheet="color:#9cdcfe;font-size:10px;font-weight:bold;",
+        ))
+
+        self._zadania_intent = QPlainTextEdit()
+        self._zadania_intent.setFont(_FONT_MONO)
+        self._zadania_intent.setPlaceholderText(
+            "np. Chcę dodać obsługę motywów kolorystycznych — jasny i ciemny.\n"
+            "Użytkownik powinien móc przełączać motyw w ustawieniach.\n"
+            "Motyw ma być pamiętany między sesjami."
         )
-        splitter.addWidget(self._plan_editor)
+        ll.addWidget(self._zadania_intent, stretch=1)
 
-        summary = QFrame()
-        summary.setStyleSheet(_CARD)
-        s_lay = QVBoxLayout(summary)
-        s_lay.setContentsMargins(8, 6, 8, 6)
-        s_lay.setSpacing(3)
-        s_lay.addWidget(QLabel("Podsumowanie:", styleSheet=_LBL_KEY))
-        self._lbl_plan_stan = QLabel("Stan: —", styleSheet=_LBL_VAL, wordWrap=True)
-        self._lbl_plan_active = QLabel("Aktywne: —", styleSheet=_LBL_VAL, wordWrap=True)
-        s_lay.addWidget(self._lbl_plan_stan)
-        s_lay.addWidget(self._lbl_plan_active)
-        splitter.addWidget(summary)
-        splitter.setSizes([350, 80])
+        # Model
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Model:", styleSheet="color:#6c7086;font-size:10px;"))
+        self._zadania_model = QComboBox()
+        self._zadania_model.addItems(CC_MODELS)
+        self._zadania_model.setFont(_FONT_MONO)
+        self._zadania_model.setCurrentText("claude-sonnet-4-6")
+        model_row.addWidget(self._zadania_model, stretch=1)
+        ll.addLayout(model_row)
 
-        lay.addWidget(splitter, stretch=1)
+        # Status
+        self._zadania_status = QLabel("")
+        self._zadania_status.setStyleSheet("color:#585b70;font-size:10px;")
+        self._zadania_status.setWordWrap(True)
+        ll.addWidget(self._zadania_status)
+
+        # Przycisk Generuj
+        self._btn_zadania_gen = QPushButton("▶  Generuj zadania przez CC")
+        self._btn_zadania_gen.setStyleSheet(_BTN_ACCENT)
+        self._btn_zadania_gen.setFont(_FONT_MONO)
+        self._btn_zadania_gen.clicked.connect(self._on_zadania_generate)
+        ll.addWidget(self._btn_zadania_gen)
+
+        self._btn_zadania_stop = QPushButton("■  Stop")
+        self._btn_zadania_stop.setStyleSheet(_BTN_DANGER)
+        self._btn_zadania_stop.setFont(_FONT_MONO)
+        self._btn_zadania_stop.setEnabled(False)
+        self._btn_zadania_stop.clicked.connect(self._on_zadania_stop)
+        ll.addWidget(self._btn_zadania_stop)
+
+        splitter.addWidget(left)
+
+        # ══ PRAWA: wyniki podzielone na pół pionowo ═══════════════════
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(6, 10, 10, 10)
+        rl.setSpacing(0)
+
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
+        right_splitter.setHandleWidth(2)
+        right_splitter.setStyleSheet("QSplitter::handle{background:#2a2a2a;}")
+
+        # Góra: lista wygenerowanych zadań
+        tasks_w = QWidget()
+        tl = QVBoxLayout(tasks_w)
+        tl.setContentsMargins(0, 0, 0, 6)
+        tl.setSpacing(4)
+        tasks_hdr = QHBoxLayout()
+        tasks_hdr.addWidget(QLabel("Wygenerowane zadania:", styleSheet="color:#9cdcfe;font-size:10px;font-weight:bold;"))
+        tasks_hdr.addStretch()
+        self._btn_zadania_save = QPushButton("✓  Zapisz do PLAN.md")
+        self._btn_zadania_save.setStyleSheet(_BTN_GREEN)
+        self._btn_zadania_save.setFont(_FONT_MONO)
+        self._btn_zadania_save.setEnabled(False)
+        self._btn_zadania_save.clicked.connect(self._on_zadania_save)
+        tasks_hdr.addWidget(self._btn_zadania_save)
+        tl.addLayout(tasks_hdr)
+
+        self._zadania_list = QPlainTextEdit()
+        self._zadania_list.setFont(_FONT_MONO)
+        self._zadania_list.setReadOnly(False)
+        self._zadania_list.setStyleSheet(
+            "QPlainTextEdit{background:#1e1e2e;color:#cdd6f4;"
+            "border:1px solid #313244;border-radius:3px;padding:6px;}"
+        )
+        self._zadania_list.setPlaceholderText(
+            "Tutaj pojawią się zadania wygenerowane przez CC.\n"
+            "Możesz je edytować przed zapisaniem do PLAN.md."
+        )
+        tl.addWidget(self._zadania_list, stretch=1)
+        right_splitter.addWidget(tasks_w)
+
+        # Dół: log CC
+        log_w = QWidget()
+        logl = QVBoxLayout(log_w)
+        logl.setContentsMargins(0, 6, 0, 0)
+        logl.setSpacing(2)
+        logl.addWidget(QLabel("Log CC:", styleSheet="color:#6c7086;font-size:9px;font-weight:bold;letter-spacing:1px;"))
+        self._zadania_log = QPlainTextEdit()
+        self._zadania_log.setReadOnly(True)
+        self._zadania_log.setFont(QFont("Consolas", 8))
+        self._zadania_log.setStyleSheet(
+            "QPlainTextEdit{background:#13131e;color:#585b70;"
+            "border:none;border-radius:3px;padding:6px;}"
+        )
+        logl.addWidget(self._zadania_log, stretch=1)
+        right_splitter.addWidget(log_w)
+
+        right_splitter.setSizes([300, 150])
+        rl.addWidget(right_splitter, stretch=1)
+
+        splitter.addWidget(right)
+        splitter.setSizes([380, 420])
+
+        root.addWidget(splitter, stretch=1)
+
+        # Stan wewnętrzny
+        self._zadania_process: QProcess | None = None
+        self._zadania_buffer: str = ""
+
         return w
+
+    _ZADANIA_SYSTEM = (
+        "Jesteś asystentem programistycznym. Na podstawie kontekstu projektu "
+        "i opisu zamierzenia użytkownika wygeneruj konkretną listę zadań "
+        "do dodania do sekcji 'next' w PLAN.md.\n\n"
+        "Zasady:\n"
+        "- Każde zadanie to jedna linia w formacie: - [ ] treść zadania\n"
+        "- Zadania mają być konkretne, atomowe i wykonalne przez programistę\n"
+        "- Nie dodawaj żadnego wstępu ani podsumowania — TYLKO lista - [ ] ...\n"
+        "- Nie używaj nagłówków ani sekcji — tylko linie - [ ] ...\n"
+        "- Liczba zadań: 3–10 zależnie od złożoności zamierzenia"
+    )
+
+    def _zadania_build_prompt(self, path: str, intent: str) -> str:
+        p = Path(path)
+        parts = [f"# Opis zamierzenia\n{intent.strip()}\n"]
+        for fname in ("CLAUDE.md", "PLAN.md", "ARCHITECTURE.md"):
+            fp = p / fname
+            if fp.exists():
+                try:
+                    content = fp.read_text(encoding="utf-8", errors="replace")[:4000]
+                    parts.append(f"# {fname}\n{content}")
+                except OSError:
+                    pass
+        return "\n\n".join(parts)
+
+    def _on_zadania_generate(self) -> None:
+        path = self._path_edit.toPlainText().strip()
+        intent = self._zadania_intent.toPlainText().strip()
+
+        if not path or not Path(path).is_dir():
+            self._zadania_status.setText("⚠ Ustaw ścieżkę projektu w zakładce Config.")
+            self._zadania_status.setStyleSheet("color:#f38ba8;font-size:10px;")
+            return
+        if not intent:
+            self._zadania_status.setText("⚠ Opisz zamierzenie przed generowaniem.")
+            self._zadania_status.setStyleSheet("color:#f38ba8;font-size:10px;")
+            return
+
+        import shutil as _shutil
+        import sys as _sys
+        cc = _shutil.which("cc") or _shutil.which("claude")
+        if not cc:
+            self._zadania_status.setText("⚠ Nie znaleziono komendy cc / claude w PATH.")
+            self._zadania_status.setStyleSheet("color:#f38ba8;font-size:10px;")
+            return
+
+        self._zadania_buffer = ""
+        self._zadania_log.clear()
+        self._zadania_list.clear()
+        self._zadania_list.setReadOnly(True)
+        self._btn_zadania_gen.setEnabled(False)
+        self._btn_zadania_stop.setEnabled(True)
+        self._btn_zadania_save.setEnabled(False)
+        self._zadania_status.setText("● Analizuję projekt i generuję zadania…")
+        self._zadania_status.setStyleSheet("color:#f9c74f;font-size:10px;")
+
+        model = self._zadania_model.currentText()
+        prompt = self._zadania_build_prompt(path, intent)
+        full_prompt = f"{self._ZADANIA_SYSTEM}\n\n{prompt}"
+
+        self._zadania_process = QProcess(self)
+        self._zadania_process.setWorkingDirectory(path)
+        self._zadania_process.readyReadStandardOutput.connect(self._zadania_on_stdout)
+        self._zadania_process.readyReadStandardError.connect(self._zadania_on_stderr)
+        self._zadania_process.finished.connect(self._zadania_on_finished)
+
+        import sys as _sys
+
+        cc_args = ["--print", "--output-format", "stream-json", "--verbose", "--model", model]
+
+        # Środowisko wyizolowane od bieżącej sesji CC — bez CC_PANEL_TERMINAL_ID
+        env = self._zadania_process.processEnvironment()
+        env.remove("CC_PANEL_TERMINAL_ID")
+        env.remove("CLAUDE_SESSION_ID")
+        self._zadania_process.setProcessEnvironment(env)
+
+        # Na Windows .cmd/.bat wymagają pośrednictwa cmd.exe.
+        # cmd /c traktuje cały string jako jedną komendę — ścieżka BEZ cudzysłowów wewnętrznych.
+        if _sys.platform == "win32" and cc.lower().endswith((".cmd", ".bat")):
+            args_str = " ".join(cc_args)
+            self._zadania_process.setProgram("cmd")
+            self._zadania_process.setArguments(["/c", f'{cc} {args_str}'])
+        else:
+            self._zadania_process.setProgram(cc)
+            self._zadania_process.setArguments(cc_args)
+
+        self._zadania_process.start()
+        if not self._zadania_process.waitForStarted(5000):
+            self._zadania_status.setText("✗ Nie udało się uruchomić CC.")
+            self._zadania_status.setStyleSheet("color:#f38ba8;font-size:10px;")
+            self._zadania_process = None
+            self._btn_zadania_gen.setEnabled(True)
+            self._btn_zadania_stop.setEnabled(False)
+            return
+
+        self._zadania_process.write(full_prompt.encode("utf-8"))
+        self._zadania_process.closeWriteChannel()
+
+    def _zadania_on_stdout(self) -> None:
+        if not self._zadania_process:
+            return
+        raw = bytes(self._zadania_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                chunk = ""
+                if obj.get("type") == "content_block_delta":
+                    chunk = obj.get("delta", {}).get("text", "")
+                elif obj.get("type") == "text":
+                    chunk = obj.get("text", "")
+                elif obj.get("type") == "result":
+                    chunk = obj.get("result", "")
+                if chunk:
+                    self._zadania_buffer += chunk
+                    # Aktualizuj listę live — pokaż linie - [ ] na bieżąco
+                    tasks = [l for l in self._zadania_buffer.splitlines() if l.strip().startswith("- [ ]")]
+                    if tasks:
+                        self._zadania_list.setPlainText("\n".join(tasks))
+            except (json.JSONDecodeError, KeyError):
+                self._zadania_log.appendPlainText(line)
+
+    def _zadania_on_stderr(self) -> None:
+        if not self._zadania_process:
+            return
+        raw = bytes(self._zadania_process.readAllStandardError()).decode("utf-8", errors="replace")
+        if raw.strip():
+            self._zadania_log.appendPlainText(f"[stderr] {raw.strip()}")
+
+    def _zadania_on_finished(self, exit_code: int, _status) -> None:
+        self._btn_zadania_gen.setEnabled(True)
+        self._btn_zadania_stop.setEnabled(False)
+        self._zadania_process = None
+
+        tasks = [l.rstrip() for l in self._zadania_buffer.splitlines() if l.strip().startswith("- [ ]")]
+        if tasks and exit_code == 0:
+            self._zadania_list.setPlainText("\n".join(tasks))
+            self._zadania_list.setReadOnly(False)
+            self._btn_zadania_save.setEnabled(True)
+            self._zadania_status.setText(f"✓ Wygenerowano {len(tasks)} zadań. Możesz je edytować przed zapisem.")
+            self._zadania_status.setStyleSheet("color:#a6e3a1;font-size:10px;")
+        elif exit_code != 0:
+            self._zadania_status.setText(f"✗ CC zakończyło z błędem (kod {exit_code}).")
+            self._zadania_status.setStyleSheet("color:#f38ba8;font-size:10px;")
+            self._zadania_list.setReadOnly(False)
+        else:
+            self._zadania_status.setText("⚠ CC nie wygenerowało żadnych zadań w formacie - [ ] ...")
+            self._zadania_status.setStyleSheet("color:#f9c74f;font-size:10px;")
+            self._zadania_log.appendPlainText(f"\n--- pełna odpowiedź ---\n{self._zadania_buffer}")
+            self._zadania_list.setReadOnly(False)
+
+    def _on_zadania_stop(self) -> None:
+        if self._zadania_process:
+            self._zadania_process.kill()
+        self._btn_zadania_gen.setEnabled(True)
+        self._btn_zadania_stop.setEnabled(False)
+        self._zadania_status.setText("■ Przerwano.")
+        self._zadania_status.setStyleSheet("color:#585b70;font-size:10px;")
+
+    def _on_zadania_save(self) -> None:
+        path = self._path_edit.toPlainText().strip()
+        if not path:
+            return
+        plan_path = Path(path) / "PLAN.md"
+        tasks_text = self._zadania_list.toPlainText().strip()
+        if not tasks_text:
+            return
+
+        # Zbierz linie - [ ] z pola (user mógł edytować)
+        new_tasks = [l.rstrip() for l in tasks_text.splitlines() if l.strip().startswith("- [ ]")]
+        if not new_tasks:
+            self._zadania_status.setText("⚠ Brak linii - [ ] do zapisania.")
+            self._zadania_status.setStyleSheet("color:#f9c74f;font-size:10px;")
+            return
+
+        try:
+            if plan_path.exists():
+                text = plan_path.read_text(encoding="utf-8")
+                from src.projektant.template_parser import read_section, write_section
+                # Sprawdź czy mamy sekcję next w formacie PCC
+                existing = read_section(text, "next") or ""
+                existing_lines = [l.rstrip() for l in existing.splitlines() if l.strip()]
+                all_tasks = existing_lines + new_tasks
+                new_body = "\n".join(all_tasks) + "\n"
+                try:
+                    updated = write_section(text, "next", new_body)
+                    plan_path.write_text(updated, encoding="utf-8")
+                    self._zadania_status.setText(
+                        f"✓ Dodano {len(new_tasks)} zadań do PLAN.md (sekcja next)."
+                    )
+                except ValueError:
+                    # Brak sekcji PCC — dołącz na końcu pliku
+                    plan_path.write_text(
+                        text.rstrip() + "\n\n## Next\n" + "\n".join(new_tasks) + "\n",
+                        encoding="utf-8",
+                    )
+                    self._zadania_status.setText(
+                        f"✓ Dodano {len(new_tasks)} zadań do PLAN.md (sekcja ## Next)."
+                    )
+            else:
+                # Brak PLAN.md — utwórz minimalny
+                plan_path.write_text(
+                    "## Next\n" + "\n".join(new_tasks) + "\n",
+                    encoding="utf-8",
+                )
+                self._zadania_status.setText(
+                    f"✓ Utworzono PLAN.md z {len(new_tasks)} zadaniami."
+                )
+            self._zadania_status.setStyleSheet("color:#a6e3a1;font-size:10px;")
+            self._btn_zadania_save.setEnabled(False)
+            # Odśwież widok PCC jeśli załadowany
+            self.reload_pcc()
+        except OSError as e:
+            self._zadania_status.setText(f"✗ Błąd zapisu: {e}")
+            self._zadania_status.setStyleSheet("color:#f38ba8;font-size:10px;")
 
     # ---- PROMPT SCORE -------------------------------------------------- #
 
     def _build_prompt_score(self) -> QWidget:
         """Osadzony PromptScorePanel — wyświetla PS.md projektu SSS."""
-        self._prompt_score = _PromptScorePanel()
+        self._prompt_score = _PromptScorePanel(slot_color=self._color)
         return self._prompt_score
 
     # ---- Monitor (Stan sesji + SSS Monitor) ---------------------------- #
@@ -811,7 +1266,10 @@ class ProjectSlotWidget(QWidget):
         return w
 
     def _build_ssm(self) -> QWidget:
-        return self._build_monitor()
+        """Placeholder — CCLauncherPanel podmienia tę zakładkę na wspólny _MonitorView."""
+        w = QWidget()
+        w.setObjectName("_monitor_placeholder")
+        return w
 
     def _sss_start_watchers(self, project_dir: Path, session_id: str) -> None:
         if not _SSS_AVAILABLE:
@@ -1618,17 +2076,65 @@ class ProjectSlotWidget(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
+        # ── Pasek narzędzi (wspólny dla obu zakładek) ──────────────────
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(8, 4, 8, 4)
         self._pcc_path_lbl = QLabel("", styleSheet=_LBL_DIM)
         self._pcc_path_lbl.setFont(_FONT_MONO)
         toolbar.addWidget(self._pcc_path_lbl, stretch=1)
+
+        # przyciski widoku PCC
         btn_refresh = QPushButton("⟳  Odśwież")
         btn_refresh.setStyleSheet(_BTN)
         btn_refresh.setFixedWidth(90)
         btn_refresh.clicked.connect(self.reload_pcc)
         toolbar.addWidget(btn_refresh)
+
+        # przyciski edytora (widoczne tylko w zakładce Edytor)
+        self._lbl_plan_path = QLabel("", styleSheet=_LBL_DIM)
+        self._lbl_plan_path.setFont(_FONT_MONO)
+        self._lbl_plan_path.hide()
+        self._btn_plan_refresh = QPushButton("Odśwież")
+        self._btn_plan_refresh.setStyleSheet(_BTN)
+        self._btn_plan_refresh.hide()
+        self._btn_plan_save = QPushButton("Zapisz")
+        self._btn_plan_save.setStyleSheet(_BTN)
+        self._btn_plan_save.setEnabled(False)
+        self._btn_plan_save.hide()
+        toolbar.addWidget(self._btn_plan_refresh)
+        toolbar.addWidget(self._btn_plan_save)
         outer.addLayout(toolbar)
+
+        # ── Wewnętrzny QTabWidget: Widok | Edytor ─────────────────────
+        inner_tabs = QTabWidget()
+        inner_tabs.setDocumentMode(True)
+        inner_tabs.setStyleSheet(f"""
+            QTabBar::tab {{
+                background:#1a1a1a; color:#5c6370;
+                font-size:10px; padding:4px 14px;
+                border:none; margin-right:2px;
+            }}
+            QTabBar::tab:selected {{
+                background:#1e1e1e; color:{self._color};
+                border-bottom:2px solid {self._color};
+            }}
+            QTabBar::tab:hover:!selected {{ background:#222222; color:#9d9d9d; }}
+        """)
+
+        def _on_inner_tab(idx: int) -> None:
+            is_editor = (idx == 1)
+            self._btn_plan_refresh.setVisible(is_editor)
+            self._btn_plan_save.setVisible(is_editor)
+            btn_refresh.setVisible(not is_editor)
+
+        inner_tabs.currentChanged.connect(_on_inner_tab)
+        outer.addWidget(inner_tabs, stretch=1)
+
+        # ── Zakładka 0: Widok (sekcje PCC) ────────────────────────────
+        view_w = QWidget()
+        view_root = QVBoxLayout(view_w)
+        view_root.setContentsMargins(0, 0, 0, 0)
+        view_root.setSpacing(0)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1713,159 +2219,486 @@ class ProjectSlotWidget(QWidget):
 
         lay.addStretch()
         scroll.setWidget(inner)
-        outer.addWidget(scroll, stretch=1)
+        view_root.addWidget(scroll, stretch=1)
+        inner_tabs.addTab(view_w, "Widok")
+
+        # ── Zakładka 1: Edytor surowy PLAN.md ─────────────────────────
+        editor_w = QWidget()
+        editor_lay = QVBoxLayout(editor_w)
+        editor_lay.setContentsMargins(6, 6, 6, 6)
+        editor_lay.setSpacing(4)
+
+        summary = QFrame()
+        summary.setStyleSheet(_CARD)
+        s_lay = QVBoxLayout(summary)
+        s_lay.setContentsMargins(8, 6, 8, 6)
+        s_lay.setSpacing(3)
+        self._lbl_plan_stan = QLabel("Stan: —", styleSheet=_LBL_VAL, wordWrap=True)
+        self._lbl_plan_active = QLabel("Aktywne: —", styleSheet=_LBL_VAL, wordWrap=True)
+        s_lay.addWidget(self._lbl_plan_stan)
+        s_lay.addWidget(self._lbl_plan_active)
+        editor_lay.addWidget(summary)
+
+        self._plan_editor = QPlainTextEdit()
+        self._plan_editor.setFont(_FONT_MONO)
+        self._plan_editor.setPlaceholderText(
+            "Brak pliku PLAN.md lub nie ustawiono ścieżki projektu."
+        )
+        editor_lay.addWidget(self._plan_editor, stretch=1)
+        inner_tabs.addTab(editor_w, "Edytor")
+
         return w
 
-    # ---- Logi Python -------------------------------------------------- #
+    # ---- Logi ---------------------------------------------------------- #
 
-    _RUN_LOG_PATH = Path.home() / ".claude" / "run_log.json"
+    _CC_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+    # Indeksy stron w QStackedWidget zakładki Logi
+    _LOGI_PAGE_PLAIN = 0   # non-SSS: surowy transkrypt
+    _LOGI_PAGE_SSS   = 1   # SSS v2/v3: transkrypt + karty statusu projektu
 
     def _build_logi(self) -> QWidget:
-        """Zakładka Logi — wywołania skryptów Pythona z run_log.json."""
+        """Zakładka Logi — transkrypt sesji CC z widokiem adaptowanym do SSS/non-SSS."""
         w = QWidget()
         root = QVBoxLayout(w)
         root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
+        root.setSpacing(4)
 
-        # Nagłówek z licznikiem i przyciskiem odśwież
+        # ── Nagłówek wspólny ────────────────────────────────────────────
         hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("Uruchomienia skryptów Pythona (CC)", styleSheet=_LBL_HEAD))
+        self._logi_title_lbl = QLabel("Transkrypt sesji CC", styleSheet=_LBL_HEAD)
+        hdr.addWidget(self._logi_title_lbl)
         hdr.addStretch()
-        self._logi_count_lbl = QLabel("", styleSheet=_LBL_DIM)
-        self._logi_count_lbl.setFont(_FONT_SMALL)
-        hdr.addWidget(self._logi_count_lbl)
+        self._logi_type_badge = QLabel("")
+        self._logi_type_badge.setStyleSheet(
+            "background:#252526;color:#5c6370;border-radius:3px;"
+            "padding:2px 8px;font-size:10px;"
+        )
+        self._logi_type_badge.setVisible(False)
+        hdr.addWidget(self._logi_type_badge)
+        self._jsonl_file_lbl = QLabel("", styleSheet=_LBL_DIM)
+        self._jsonl_file_lbl.setFont(_FONT_SMALL)
+        hdr.addWidget(self._jsonl_file_lbl)
         btn_refresh = QPushButton("⟳")
         btn_refresh.setFixedWidth(28)
         btn_refresh.setStyleSheet(_BTN)
-        btn_refresh.clicked.connect(self.reload_logi)
+        btn_refresh.clicked.connect(self.reload_jsonl_transcript)
         hdr.addWidget(btn_refresh)
         root.addLayout(hdr)
 
-        # Pole tekstowe z wpisami
-        self._logi_view = QPlainTextEdit()
-        self._logi_view.setReadOnly(True)
-        self._logi_view.setFont(_FONT_MONO)
-        self._logi_view.setStyleSheet(
-            "QPlainTextEdit{background:#0d1117;color:#cccccc;"
-            "border:1px solid #3c3c3c;border-radius:3px;padding:6px}"
+        # ── QStackedWidget: dwie strony ──────────────────────────────────
+        self._logi_stack = QStackedWidget()
+
+        # Strona 0 — non-SSS: samo pole tekstowe z transkryptem
+        self._jsonl_view = QTextEdit()
+        self._jsonl_view.setReadOnly(True)
+        self._jsonl_view.setFont(_FONT_MONO)
+        self._jsonl_view.setStyleSheet(
+            "QTextEdit{background:#0d1117;border:1px solid #3c3c3c;border-radius:3px;padding:6px}"
         )
-        self._logi_view.setPlaceholderText(
-            "(brak wpisów — skrypty Python uruchamiane przez CC pojawią się tutaj)"
+        self._jsonl_view.setPlaceholderText(
+            "(brak pliku sesji — uruchom sesję CC dla tego projektu)"
         )
-        root.addWidget(self._logi_view, stretch=1)
+        self._logi_stack.addWidget(self._jsonl_view)
 
-        # Statystyki na dole
-        stats_frame = QFrame()
-        stats_frame.setStyleSheet(_CARD)
-        sl = QHBoxLayout(stats_frame)
-        sl.setContentsMargins(8, 4, 8, 4)
-        self._logi_total_lbl = _val("Łącznie: —")
-        self._logi_last_lbl = _val("Ostatnie: —", _LBL_DIM)
-        self._logi_session_lbl = _val("Projekt: —", _LBL_DIM)
-        sl.addWidget(self._logi_total_lbl)
-        sl.addWidget(QLabel(" | ", styleSheet=_LBL_DIM))
-        sl.addWidget(self._logi_last_lbl)
-        sl.addWidget(QLabel(" | ", styleSheet=_LBL_DIM))
-        sl.addWidget(self._logi_session_lbl)
-        sl.addStretch()
-        root.addWidget(stats_frame)
+        # Strona 1 — SSS: splitter z kartami statusu (góra) + transkrypt (dół)
+        sss_page = QWidget()
+        sss_page.setStyleSheet("background:#141414;")
+        sss_lay = QVBoxLayout(sss_page)
+        sss_lay.setContentsMargins(0, 0, 0, 0)
+        sss_lay.setSpacing(4)
 
-        # Watcher na run_log.json
-        self._logi_watcher = QFileSystemWatcher(w)
-        if self._RUN_LOG_PATH.exists():
-            self._logi_watcher.addPath(str(self._RUN_LOG_PATH))
-        self._logi_watcher.fileChanged.connect(self._on_logi_changed)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setStyleSheet(
+            "QSplitter::handle{background:#2a2a2a;height:4px;}"
+        )
 
-        # Polling gdy plik jeszcze nie istnieje
-        self._logi_poll = QTimer(w)
-        self._logi_poll.setInterval(10_000)
-        self._logi_poll.timeout.connect(self._logi_poll_tick)
-        if not self._RUN_LOG_PATH.exists():
-            self._logi_poll.start()
+        # Górna część — karty statusu SSS
+        self._logi_sss_status = QWidget()
+        self._logi_sss_status.setStyleSheet("background:#141414;")
+        self._logi_sss_status_lay = QHBoxLayout(self._logi_sss_status)
+        self._logi_sss_status_lay.setContentsMargins(0, 4, 0, 4)
+        self._logi_sss_status_lay.setSpacing(8)
+        self._logi_sss_status_lay.addStretch()
+        self._logi_sss_status.setMaximumHeight(120)
+        splitter.addWidget(self._logi_sss_status)
+
+        # Dolna część — transkrypt SSS (ta sama paleta, inny widget)
+        self._jsonl_view_sss = QTextEdit()
+        self._jsonl_view_sss.setReadOnly(True)
+        self._jsonl_view_sss.setFont(_FONT_MONO)
+        self._jsonl_view_sss.setStyleSheet(
+            "QTextEdit{background:#0d1117;border:1px solid #3c3c3c;border-radius:3px;padding:6px}"
+        )
+        self._jsonl_view_sss.setPlaceholderText(
+            "(brak pliku sesji — uruchom sesję CC dla tego projektu)"
+        )
+        splitter.addWidget(self._jsonl_view_sss)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        sss_lay.addWidget(splitter, stretch=1)
+        self._logi_stack.addWidget(sss_page)
+
+        root.addWidget(self._logi_stack, stretch=1)
+
+        # ── Watcher na katalog projektów CC ──────────────────────────────
+        self._jsonl_watcher = QFileSystemWatcher(w)
+        self._jsonl_watcher.fileChanged.connect(self._on_jsonl_changed)
+        self._jsonl_watcher.directoryChanged.connect(self._on_jsonl_dir_changed)
 
         return w
 
-    def _logi_poll_tick(self) -> None:
-        if self._RUN_LOG_PATH.exists():
-            self._logi_watcher.addPath(str(self._RUN_LOG_PATH))
-            self._logi_poll.stop()
-            self.reload_logi()
+    # -- Detekcja SSS -----------------------------------------------------
 
-    def _on_logi_changed(self, path: str) -> None:
-        # Re-podepnij po nadpisaniu pliku (QFileSystemWatcher traci ścieżkę)
-        if path not in self._logi_watcher.files():
+    @staticmethod
+    def _detect_sss_version(project_path: str) -> str | None:
+        """Zwraca 'v3', 'v2' lub None gdy projekt nie jest SSS."""
+        if not project_path:
+            return None
+        p = Path(project_path)
+        # v3: PS.md + PLAN.md z markerem SECTION:next
+        if (p / "PS.md").exists():
+            plan = p / "PLAN.md"
+            if plan.exists():
+                try:
+                    if "<!-- SECTION:next -->" in plan.read_text(encoding="utf-8", errors="ignore"):
+                        return "v3"
+                except Exception:
+                    pass
+            return "v3"  # PS.md samo w sobie wystarczy jako sygnał v3
+        # v2: intake.json
+        if (p / "intake.json").exists():
+            return "v2"
+        # Fallback: PLAN.md z markerem
+        plan = p / "PLAN.md"
+        if plan.exists():
+            try:
+                if "<!-- SECTION:next -->" in plan.read_text(encoding="utf-8", errors="ignore"):
+                    return "v3"
+            except Exception:
+                pass
+        return None
+
+    # -- Widok SSS — karty statusu ----------------------------------------
+
+    def _rebuild_sss_status_cards(self, project_path: str, sss_version: str) -> None:
+        """Czyści i odbudowuje karty statusu SSS w górnej części widoku Logi."""
+        lay = self._logi_sss_status_lay
+        # Usuń wszystkie widgety poza końcowym stretch
+        while lay.count() > 1:
+            item = lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        p = Path(project_path)
+
+        # Karta: wersja SSS
+        lay.insertWidget(lay.count() - 1, self._make_logi_card(
+            "SSS", sss_version,
+            "#98c379" if sss_version == "v3" else "#e5c07b",
+            sub="Scripted Skills System",
+        ))
+
+        # Karta: status PLAN.md
+        plan_status, plan_task, plan_session = self._read_plan_status(p)
+        lay.insertWidget(lay.count() - 1, self._make_logi_card(
+            "PLAN", plan_status or "—",
+            "#61afef",
+            sub=f"sesja {plan_session}" if plan_session else plan_task or "",
+        ))
+
+        # Karta: PS.md (tylko v3)
+        if sss_version == "v3":
+            ps_status, ps_score = self._read_ps_status(p)
+            lay.insertWidget(lay.count() - 1, self._make_logi_card(
+                "PS", ps_status or "—",
+                "#c678dd" if ps_status == "scored" else "#5c6370",
+                sub=ps_score,
+            ))
+
+        # Karta: liczba sesji CC
+        n_sessions = self._count_cc_sessions(project_path)
+        lay.insertWidget(lay.count() - 1, self._make_logi_card(
+            "Sesje CC", str(n_sessions) if n_sessions is not None else "—",
+            "#56b6c2",
+            sub="pliki .jsonl",
+        ))
+
+    @staticmethod
+    def _make_logi_card(title: str, value: str, color: str, sub: str = "") -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame{{background:#1e1e1e;border:1px solid {color}33;"
+            "border-radius:4px;min-width:90px;max-width:160px;}}"
+        )
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(2)
+
+        t_lbl = QLabel(title)
+        t_lbl.setStyleSheet("color:#5c6370;font-size:9px;background:transparent;border:none;")
+        lay.addWidget(t_lbl)
+
+        v_lbl = QLabel(value)
+        v_lbl.setStyleSheet(
+            f"color:{color};font-size:13px;font-weight:bold;"
+            "background:transparent;border:none;"
+        )
+        lay.addWidget(v_lbl)
+
+        if sub:
+            s_lbl = QLabel(sub)
+            s_lbl.setStyleSheet("color:#4a4a5a;font-size:9px;background:transparent;border:none;")
+            s_lbl.setWordWrap(True)
+            lay.addWidget(s_lbl)
+
+        return card
+
+    @staticmethod
+    def _read_plan_status(project_path: Path) -> tuple[str, str, str]:
+        """Czyta status, aktualny task i numer sesji z PLAN.md. Zwraca (status, task, session)."""
+        plan = project_path / "PLAN.md"
+        if not plan.exists():
+            return "", "", ""
+        try:
+            text = plan.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return "", "", ""
+
+        status = ""
+        task = ""
+        session = ""
+        in_meta = False
+        for line in text.splitlines():
+            s = line.strip()
+            if s == "## Meta" or "<!-- SECTION:meta -->" in s:
+                in_meta = True
+            elif s.startswith("## ") and in_meta:
+                in_meta = False
+            if in_meta:
+                if s.startswith("- status:"):
+                    status = s.split(":", 1)[1].strip()
+                elif s.startswith("- session:"):
+                    session = s.split(":", 1)[1].strip()
+            if s.startswith("- task:"):
+                task = s.split(":", 1)[1].strip()
+
+        return status, task, session
+
+    @staticmethod
+    def _read_ps_status(project_path: Path) -> tuple[str, str]:
+        """Czyta status i wynik oceny z PS.md. Zwraca (status, score_summary)."""
+        ps = project_path / "PS.md"
+        if not ps.exists():
+            return "brak", ""
+        try:
+            text = ps.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return "błąd", ""
+
+        status = ""
+        mean_competence = ""
+        mean_arch = ""
+
+        # status z sekcji meta
+        in_meta = False
+        for line in text.splitlines():
+            s = line.strip()
+            if "<!-- SECTION:meta -->" in s:
+                in_meta = True
+            elif "<!-- /SECTION:meta -->" in s:
+                in_meta = False
+            if in_meta and s.startswith("- status:"):
+                status = s.split(":", 1)[1].strip()
+
+        # mean ze score_competence i score_architecture
+        for section_marker, store in [
+            ("<!-- SECTION:score_competence -->", "comp"),
+            ("<!-- SECTION:score_architecture -->", "arch"),
+        ]:
+            in_section = False
+            in_aggregate = False
+            for line in text.splitlines():
+                s = line.strip()
+                if section_marker in s:
+                    in_section = True
+                elif "<!-- /SECTION:" in s and in_section:
+                    in_section = False
+                if in_section and "### aggregate" in s:
+                    in_aggregate = True
+                elif in_section and s.startswith("### ") and in_aggregate:
+                    in_aggregate = False
+                if in_aggregate and s.startswith("- mean:"):
+                    val = s.split(":", 1)[1].strip()
+                    if val and val not in ("-", "—"):
+                        if store == "comp":
+                            mean_competence = val
+                        else:
+                            mean_arch = val
+
+        score_parts = []
+        if mean_competence:
+            score_parts.append(f"comp {mean_competence}")
+        if mean_arch:
+            score_parts.append(f"arch {mean_arch}")
+        score_summary = " · ".join(score_parts)
+
+        return (status or "—"), score_summary
+
+    def _count_cc_sessions(self, project_path: str) -> int | None:
+        cc_dir = self._path_to_cc_project_dir(project_path)
+        if not cc_dir:
+            return None
+        return len(list(cc_dir.glob("*.jsonl")))
+
+    # -- Pomocnicze -------------------------------------------------------
+
+    @staticmethod
+    def _path_to_cc_project_dir(project_path: str) -> Path | None:
+        """Konwertuje ścieżkę projektu na katalog w ~/.claude/projects/."""
+        if not project_path:
+            return None
+        raw = str(Path(project_path))
+        folder = re.sub(r'[^a-zA-Z0-9]', '-', raw)
+        cc_dir = Path.home() / ".claude" / "projects" / folder
+        return cc_dir if cc_dir.is_dir() else None
+
+    def _latest_jsonl(self, project_path: str) -> Path | None:
+        """Zwraca najnowszy plik .jsonl dla danego projektu."""
+        cc_dir = self._path_to_cc_project_dir(project_path)
+        if not cc_dir:
+            return None
+        files = sorted(cc_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return files[0] if files else None
+
+    def _on_jsonl_changed(self, path: str) -> None:
+        if path not in self._jsonl_watcher.files():
             if Path(path).exists():
-                self._logi_watcher.addPath(path)
-        self.reload_logi()
+                self._jsonl_watcher.addPath(path)
+        self.reload_jsonl_transcript()
 
-    def reload_logi(self) -> None:
-        """Wczytaj run_log.json i wyświetl wpisy pasujące do cwd tego slotu."""
+    def _on_jsonl_dir_changed(self, _path: str) -> None:
+        self.reload_jsonl_transcript()
+
+    def _switch_logi_view(self, project_path: str) -> str | None:
+        """Przełącza stack na właściwy widok i aktualizuje badge. Zwraca wersję SSS lub None."""
+        sss_ver = self._detect_sss_version(project_path)
+        if sss_ver:
+            self._logi_stack.setCurrentIndex(self._LOGI_PAGE_SSS)
+            self._logi_type_badge.setText(f"SSS {sss_ver}")
+            self._logi_type_badge.setStyleSheet(
+                f"background:{'#1a2a1a' if sss_ver == 'v3' else '#2a1a00'};"
+                f"color:{'#98c379' if sss_ver == 'v3' else '#e5c07b'};"
+                "border-radius:3px;padding:2px 8px;font-size:10px;font-weight:bold;"
+            )
+            self._logi_type_badge.setVisible(True)
+            self._rebuild_sss_status_cards(project_path, sss_ver)
+        else:
+            self._logi_stack.setCurrentIndex(self._LOGI_PAGE_PLAIN)
+            self._logi_type_badge.setText("non-SSS")
+            self._logi_type_badge.setStyleSheet(
+                "background:#252526;color:#5c6370;border-radius:3px;"
+                "padding:2px 8px;font-size:10px;"
+            )
+            self._logi_type_badge.setVisible(True)
+        return sss_ver
+
+    def reload_jsonl_transcript(self) -> None:
+        """Wczytuje najnowszy plik .jsonl CC i wyświetla transkrypt w aktywnym widoku."""
         project_path = self._path_edit.toPlainText().strip()
+        sss_ver = self._switch_logi_view(project_path)
 
-        if not self._RUN_LOG_PATH.exists():
-            self._logi_view.setPlainText("(plik run_log.json jeszcze nie istnieje)")
-            self._logi_count_lbl.setText("")
-            self._logi_total_lbl.setText("Łącznie: 0")
-            self._logi_last_lbl.setText("Ostatnie: —")
-            self._logi_session_lbl.setText("Projekt: —")
+        # Który QTextEdit jest aktywny
+        active_view: QTextEdit = (
+            self._jsonl_view_sss if sss_ver else self._jsonl_view
+        )
+
+        latest = self._latest_jsonl(project_path)
+        if latest is None:
+            cc_dir = self._path_to_cc_project_dir(project_path)
+            if cc_dir is None:
+                msg = "(projekt nie ustawiony lub brak katalogu CC dla tej ścieżki)"
+            else:
+                msg = f"(brak plików .jsonl w {cc_dir})"
+            active_view.setPlainText(msg)
+            self._jsonl_file_lbl.setText("")
+            if cc_dir and str(cc_dir) not in self._jsonl_watcher.directories():
+                self._jsonl_watcher.addPath(str(cc_dir))
             return
 
+        cc_dir = latest.parent
+        if str(cc_dir) not in self._jsonl_watcher.directories():
+            self._jsonl_watcher.addPath(str(cc_dir))
+        if str(latest) not in self._jsonl_watcher.files():
+            self._jsonl_watcher.addPath(str(latest))
+
+        self._jsonl_file_lbl.setText(latest.name[:20] + "…")
+
         try:
-            all_entries = json.loads(self._RUN_LOG_PATH.read_text(encoding="utf-8"))
-            if not isinstance(all_entries, list):
-                all_entries = []
-        except Exception:
-            all_entries = []
+            raw_lines = latest.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+        except Exception as exc:
+            active_view.setPlainText(f"(błąd odczytu: {exc})")
+            return
 
-        # Filtruj po cwd jeśli ścieżka projektu jest ustawiona
-        if project_path:
-            norm_proj = Path(project_path).resolve()
-            def _matches(e: dict) -> bool:
-                cwd = e.get("cwd", "")
-                if not cwd:
-                    return False
-                try:
-                    return Path(cwd).resolve() == norm_proj
-                except Exception:
-                    return False
-            entries = [e for e in all_entries if _matches(e)]
+        _COLOR_USER = QColor("#7dd3fc")
+        _COLOR_ASST = QColor("#86efac")
+        _COLOR_TS   = QColor("#6b7280")
+
+        _fmt_user = QTextCharFormat()
+        _fmt_user.setForeground(_COLOR_USER)
+        _fmt_asst = QTextCharFormat()
+        _fmt_asst.setForeground(_COLOR_ASST)
+        _fmt_ts = QTextCharFormat()
+        _fmt_ts.setForeground(_COLOR_TS)
+
+        active_view.clear()
+        cursor = active_view.textCursor()
+        has_any = False
+
+        for raw in raw_lines:
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            msg_type = d.get("type", "")
+            ts = d.get("timestamp", "")
+            short_ts = ts[11:19] if len(ts) >= 19 else ts
+
+            if msg_type == "user":
+                content = d.get("message", {}).get("content", "")
+                if isinstance(content, list):
+                    parts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+                    content = " ".join(parts)
+                content = str(content).strip()
+                if not content or content.startswith("<"):
+                    continue
+                text_body = content.replace("\n", " ")[:300]
+                cursor.insertText(f"[{short_ts}] ", _fmt_ts)
+                cursor.insertText(f"U: {text_body}\n", _fmt_user)
+                has_any = True
+
+            elif msg_type == "assistant":
+                msg_obj = d.get("message", {})
+                content_blocks = msg_obj.get("content", [])
+                if isinstance(content_blocks, list):
+                    texts = [b.get("text", "") for b in content_blocks if isinstance(b, dict) and b.get("type") == "text"]
+                    text = " ".join(texts).strip()
+                elif isinstance(content_blocks, str):
+                    text = content_blocks.strip()
+                else:
+                    text = ""
+                if not text:
+                    continue
+                text_body = text.replace("\n", " ")[:300]
+                cursor.insertText(f"[{short_ts}] ", _fmt_ts)
+                cursor.insertText(f"A: {text_body}\n", _fmt_asst)
+                has_any = True
+
+        if not has_any:
+            active_view.setPlainText("(plik nie zawiera wiadomości user/assistant)")
         else:
-            entries = list(all_entries)
-
-        total_all = len(all_entries)
-        total_proj = len(entries)
-
-        # Nagłówek licznika
-        if project_path:
-            proj_name = Path(project_path).name
-            self._logi_count_lbl.setText(
-                f"{total_proj} dla projektu  ·  {total_all} łącznie"
-            )
-            self._logi_session_lbl.setText(f"Projekt: {proj_name}")
-        else:
-            self._logi_count_lbl.setText(f"{total_all} łącznie")
-            self._logi_session_lbl.setText("Projekt: (wszystkie)")
-
-        self._logi_total_lbl.setText(f"Łącznie wywołań: {total_proj}")
-
-        if entries:
-            last = entries[-1]
-            self._logi_last_lbl.setText(f"Ostatnie: {last.get('ts', '—')}")
-        else:
-            self._logi_last_lbl.setText("Ostatnie: —")
-
-        # Renderuj wpisy — od najnowszego
-        lines = []
-        for e in reversed(entries):
-            ts = e.get("ts", "")
-            cmd = e.get("cmd", "").strip()
-            cwd = e.get("cwd", "")
-            short_cwd = Path(cwd).name if cwd else ""
-            lines.append(f"{ts}  [{short_cwd}]\n  > {cmd}\n")
-
-        self._logi_view.setPlainText("\n".join(lines) if lines else "(brak wywołań dla tego projektu)")
-        # Przewiń na górę (najnowsze)
-        self._logi_view.moveCursor(QTextCursor.MoveOperation.Start)
+            active_view.moveCursor(QTextCursor.MoveOperation.End)
 
     # ---- Historia ------------------------------------------------------ #
 
@@ -2108,45 +2941,20 @@ class ProjectSlotWidget(QWidget):
             "Otwórz VS Code z projektem i uruchom N terminali CC przez cc-panel"
         )
 
-        self._btn_window = QPushButton("OKNO")
-        self._btn_window.setStyleSheet(_BTN_GREEN)
-        self._btn_window.setFont(_FONT_MONO)
-        self._btn_window.setToolTip("Otwórz nowe okno VS Code z projektem")
-
-        self._btn_push = QPushButton("↑ Push")
-        self._btn_push.setStyleSheet(_BTN)
-        self._btn_push.setFont(_FONT_MONO)
-        self._btn_push.setToolTip("git add -A + commit + push")
-
-        self._btn_round = QPushButton("⟳ Runda")
-        self._btn_round.setStyleSheet(_BTN_GREEN)
-        self._btn_round.setFont(_FONT_MONO)
-        self._btn_round.setToolTip("Zakoncz runde: wyczys PLAN.md (Done/Current) + push")
-
-        self._btn_stop = QPushButton("KONIEC")
-        self._btn_stop.setStyleSheet(_BTN_DANGER)
-        self._btn_stop.setFont(_FONT_MONO)
-        self._btn_stop.setToolTip("Zatrzymaj sesje Auto-Accept CC")
-
         row.addWidget(self._btn_launch, stretch=2)
-        row.addWidget(self._btn_window)
-        row.addWidget(self._btn_push)
-        row.addWidget(self._btn_round)
-        row.addWidget(self._btn_stop)
         return w
 
     # ------------------------------------------------------------------ #
     # Sygnały                                                               #
     # ------------------------------------------------------------------ #
 
-    _TAB_PROMPT_SCORE = 4  # indeks zakładki Prompt Score w self._tabs
+    _TAB_PROMPT_SCORE = 9   # indeks zakładki Prompt Score w self._tabs (zewnętrzny)
+    _TAB_EXPLORER    = 10
+    _TAB_README      = 11
+    _TAB_CHANGELOG   = 12
 
     def _connect_signals(self) -> None:
         self._btn_launch.clicked.connect(lambda: self.launch_requested.emit(self._slot_id))
-        self._btn_window.clicked.connect(lambda: self.window_requested.emit(self._slot_id))
-        self._btn_push.clicked.connect(self._on_push)
-        self._btn_round.clicked.connect(self._on_round_end)
-        self._btn_stop.clicked.connect(lambda: self.stop_requested.emit(self._slot_id))
         self._btn_browse.clicked.connect(self._on_browse)
         self._btn_plan_refresh.clicked.connect(self.reload_plan)
         self._btn_plan_save.clicked.connect(self._on_plan_save)
@@ -2159,9 +2967,14 @@ class ProjectSlotWidget(QWidget):
             self._model_combo.currentIndexChanged,
             self._effort_combo.currentIndexChanged,
             self._perm_combo.currentIndexChanged,
+            self._pre_cmd_edit.textChanged,
+            self._cc_flags_edit.textChanged,
             self._vibe_edit.textChanged,
+            self._chk_verbose.stateChanged,
+            self._chk_no_update.stateChanged,
         ):
             sig.connect(self._on_config_changed)
+        self._session_mode_group.idToggled.connect(lambda _id, _checked: self._on_config_changed())
         self._plan_editor.textChanged.connect(lambda: self._btn_plan_save.setEnabled(True))
 
     def _on_tab_changed(self, index: int) -> None:
@@ -2184,13 +2997,35 @@ class ProjectSlotWidget(QWidget):
             self._show_transcript(snap.transcript_path)
 
     def get_config(self) -> SlotConfig:
+        flags_parts: list[str] = []
+        session_flags = ["", "--resume", "--continue"]
+        sid = self._session_mode_group.checkedId()
+        if sid > 0:
+            flags_parts.append(session_flags[sid])
+        if self._chk_verbose.isChecked():
+            flags_parts.append("--verbose")
+        if self._chk_no_update.isChecked():
+            flags_parts.append("--no-update-check")
+        if self._chk_no_flicker.isChecked():
+            flags_parts.append("--no-flicker")
+        extra = self._cc_flags_edit.toPlainText().strip()
+        if extra:
+            flags_parts.append(extra)
+        raw_prompt = self._vibe_edit.toPlainText() or DEFAULT_VIBE_PROMPT
+        if self._chk_focus.isChecked() and not raw_prompt.startswith("/focus"):
+            vibe = "/focus\n" + raw_prompt
+        elif not self._chk_focus.isChecked() and raw_prompt.startswith("/focus\n"):
+            vibe = raw_prompt[len("/focus\n"):]
+        else:
+            vibe = raw_prompt
         return SlotConfig(
             project_path=self._path_edit.toPlainText().strip(),
             model=self._model_combo.currentText(),
             effort=self._effort_combo.currentText(),
             permission_mode=self._perm_combo.currentText(),
             pre_command=self._pre_cmd_edit.toPlainText().strip(),
-            vibe_prompt=self._vibe_edit.toPlainText() or DEFAULT_VIBE_PROMPT,
+            cc_flags=" ".join(flags_parts),
+            vibe_prompt=vibe,
         )
 
     def reload_plan(self) -> None:
@@ -2280,9 +3115,16 @@ class ProjectSlotWidget(QWidget):
         self._pcc_log.setPlainText("\n".join(reversed(log_lines)) if log_lines else "")
 
     def reload_md_files(self) -> None:
-        """Odświeża zakładki CLAUDE.md, ARCHITECTURE.md, CONVENTIONS.md."""
+        """Odświeża zakładki CLAUDE.md, ARCHITECTURE.md, CONVENTIONS.md oraz Explorer/README/CHANGELOG."""
         for filename in ("CLAUDE.md", "ARCHITECTURE.md", "CONVENTIONS.md"):
             self._reload_md_file(filename)
+        path_str = self._path_edit.toPlainText().strip()
+        if path_str:
+            p = Path(path_str)
+            if p.is_dir():
+                self._explorer_section.set_project(p)
+                self._readme_section.set_project(p)
+                self._changelog_section.set_project(p)
 
     def reload_stats(self) -> None:
         path = self._path_edit.toPlainText().strip()
@@ -2310,9 +3152,13 @@ class ProjectSlotWidget(QWidget):
             self._effort_combo.currentIndexChanged,
             self._perm_combo.currentIndexChanged,
             self._pre_cmd_edit.textChanged,
+            self._cc_flags_edit.textChanged,
             self._vibe_edit.textChanged,
+            self._chk_verbose.stateChanged,
+            self._chk_no_update.stateChanged,
         ):
             sig.disconnect(self._on_config_changed)
+        self._session_mode_group.idToggled.disconnect()
 
         self._path_edit.setPlainText(self._config.project_path)
         idx = self._model_combo.findText(self._config.model)
@@ -2324,15 +3170,40 @@ class ProjectSlotWidget(QWidget):
         self._pre_cmd_edit.setPlainText(self._config.pre_command)
         self._vibe_edit.setPlainText(self._config.vibe_prompt)
 
+        # Odtwórz stan widgetów flag z zapisanego cc_flags string
+        saved_flags = getattr(self._config, "cc_flags", "")
+        self._chk_verbose.setChecked("--verbose" in saved_flags)
+        self._chk_no_update.setChecked("--no-update-check" in saved_flags)
+        self._chk_no_flicker.setChecked("--no-flicker" in saved_flags)
+        if "--resume" in saved_flags:
+            self._session_mode_group.button(1).setChecked(True)
+        elif "--continue" in saved_flags:
+            self._session_mode_group.button(2).setChecked(True)
+        else:
+            self._session_mode_group.button(0).setChecked(True)
+        # Odtwórz /focus z vibe_prompt
+        saved_prompt = self._config.vibe_prompt
+        self._chk_focus.setChecked(saved_prompt.startswith("/focus"))
+        # W ręcznym polu zostawiamy tylko flagi spoza znanych
+        _known = {"--resume", "--continue", "--verbose", "--no-update-check", "--no-flicker"}
+        extra_flags = " ".join(
+            t for t in saved_flags.split() if t not in _known
+        )
+        self._cc_flags_edit.setPlainText(extra_flags)
+
         for sig in (
             self._path_edit.textChanged,
             self._model_combo.currentIndexChanged,
             self._effort_combo.currentIndexChanged,
             self._perm_combo.currentIndexChanged,
             self._pre_cmd_edit.textChanged,
+            self._cc_flags_edit.textChanged,
             self._vibe_edit.textChanged,
+            self._chk_verbose.stateChanged,
+            self._chk_no_update.stateChanged,
         ):
             sig.connect(self._on_config_changed)
+        self._session_mode_group.idToggled.connect(lambda _id, _checked: self._on_config_changed())
 
         if self._config.project_path:
             self._lbl_plan_path.setText(
@@ -2343,7 +3214,8 @@ class ProjectSlotWidget(QWidget):
             self.reload_stats()
             self.reload_history()
             self.reload_md_files()
-            self.reload_logi()
+            self.reload_jsonl_transcript()
+            self._clean_clear.load_project(self._config.project_path)
 
     def _on_config_changed(self) -> None:
         self._save_timer.start(800)
@@ -2359,13 +3231,30 @@ class ProjectSlotWidget(QWidget):
         self.config_changed.emit()
 
     def _notify_sss(self, path: str) -> None:
-        """Wykrywa projekt SSS v2 na podstawie intake.json i emituje sss_detected."""
-        intake = _read_intake(path) if path else None
-        is_sss = intake is not None
-        name = (intake.get("project_name") or "") if intake else ""
+        """Wykrywa projekt SSS (v2/v3) i emituje sss_detected; odświeża widok Logi."""
+        sss_ver = self._detect_sss_version(path) if path else None
+        is_sss = sss_ver is not None
+
+        # Zachowaj kompatybilność: dla v2 czytaj project_name z intake.json
+        if sss_ver == "v2":
+            intake = _read_intake(path)
+            name = (intake.get("project_name") or "") if intake else ""
+        elif sss_ver == "v3":
+            # Nazwa z PLAN.md (pierwsza linia) lub nazwa katalogu
+            try:
+                first_line = (Path(path) / "PLAN.md").read_text(encoding="utf-8").splitlines()[0]
+                name = first_line.lstrip("#").strip() or Path(path).name
+            except Exception:
+                name = Path(path).name
+        else:
+            name = ""
+
         self._is_sss = is_sss
         self._sss_name = name
         self.sss_detected.emit(self._slot_id, is_sss, name)
+
+        # Odśwież widok Logi (przełącza stronę stosu + karty statusu)
+        self._switch_logi_view(path)
 
     def _on_browse(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -2380,6 +3269,8 @@ class ProjectSlotWidget(QWidget):
             self.reload_stats()
             self.reload_history()
             self.reload_md_files()
+            self._clean_clear.load_project(folder)
+            self.reload_jsonl_transcript()
             if self._tabs.currentIndex() == self._TAB_PROMPT_SCORE:
                 self._prompt_score_loaded = True
                 self.reload_prompt_score()
@@ -2438,16 +3329,6 @@ class ProjectSlotWidget(QWidget):
         self._lbl_git_url.setToolTip(s.git_remote_url)
         self._lbl_branch.setText(s.git_branch or "—")
 
-        from src.cc_launcher.project_stats import KEY_FILES
-        for fname in KEY_FILES:
-            lbl = self._key_file_labels[fname]
-            if fname in s.key_file_sizes:
-                lbl.setText(fmt_size(s.key_file_sizes[fname]))
-                lbl.setStyleSheet(_LBL_VAL)
-            else:
-                lbl.setText("brak")
-                lbl.setStyleSheet(_LBL_DIM)
-
     def _render_history(self) -> None:
         self._reload_sesje_view()
 
@@ -2460,8 +3341,6 @@ class ProjectSlotWidget(QWidget):
             self.stop_completed.emit(self._slot_id)
             return
         self._stop_pending = True
-        self._btn_round.setEnabled(False)
-        self._btn_stop.setEnabled(False)
         self._workflow.run_round_end(path)
 
     def _on_push(self) -> None:
@@ -2474,15 +3353,12 @@ class ProjectSlotWidget(QWidget):
         if not (Path(path) / ".git").exists():
             self._show_git_init_dialog(path)
             return
-        self._btn_push.setEnabled(False)
         self._workflow.run_git_push(path)
 
     def _show_git_init_dialog(self, path: str, then_round_end: bool = False) -> None:
         dlg = GitInitDialog(path, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self._btn_push.setEnabled(False)
-        self._btn_round.setEnabled(False)
         self._git_init_then_round_end = then_round_end
         self._workflow.run_git_init(
             project_path=path,
@@ -2516,13 +3392,9 @@ class ProjectSlotWidget(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self._btn_round.setEnabled(False)
             self._workflow.run_round_end(path)
 
     def _on_workflow_done(self, name: str, ok: bool, msg: str) -> None:
-        self._btn_push.setEnabled(True)
-        self._btn_round.setEnabled(True)
-        self._btn_stop.setEnabled(True)
         if name in ("round_end", "clean_plan") and ok:
             self.reload_plan()
             self.reload_pcc()
@@ -2532,7 +3404,6 @@ class ProjectSlotWidget(QWidget):
                 self._git_init_then_round_end = False
                 path = self._path_edit.toPlainText().strip()
                 if path:
-                    self._btn_round.setEnabled(False)
                     self._workflow.run_round_end(path)
                 return
         if name == "git_init":
@@ -3145,9 +4016,19 @@ def _start_cc_with_prompt(proc: "QProcess", cc: str, prompt: str) -> bool:
 
     Zwraca True jeśli proces wystartował. Używa stdin żeby ominąć limit
     długości argumentu wiersza poleceń Windows i poprawnie przekazać prompt.
+    Na Windows pliki .cmd/.bat wymagają pośrednictwa cmd.exe.
     """
-    proc.setProgram(cc)
-    proc.setArguments(["--print", "--output-format", "stream-json"])
+    import sys as _sys
+    cc_args = ["--print", "--output-format", "stream-json", "--verbose"]
+    if _sys.platform == "win32" and cc.lower().endswith((".cmd", ".bat")):
+        # QProcess nie może bezpośrednio uruchomić .cmd — potrzebuje cmd.exe.
+        # cmd /c traktuje cały string jako jedną komendę — ścieżka BEZ cudzysłowów wewnętrznych.
+        args_str = " ".join(cc_args)
+        proc.setProgram("cmd")
+        proc.setArguments(["/c", f'{cc} {args_str}'])
+    else:
+        proc.setProgram(cc)
+        proc.setArguments(cc_args)
     proc.start()
     if not proc.waitForStarted(3000):
         return False
@@ -3265,17 +4146,14 @@ class _ColoredSlotTabBar(QTabBar):
     def __init__(self, colors: list[str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._colors = [QColor(c) for c in colors]
-        self._sub_labels: list[str] = ["", "", "", ""]
-        # (tekst_statusu, kolor_statusu) per slot
+        n = len(colors)
+        self._sub_labels: list[str] = [""] * n
         self._status_labels: list[tuple[str, QColor]] = [
-            ("", _STATUS_COLOR_OFFLINE),
-            ("", _STATUS_COLOR_OFFLINE),
-            ("", _STATUS_COLOR_OFFLINE),
-            ("", _STATUS_COLOR_OFFLINE),
+            ("", _STATUS_COLOR_OFFLINE) for _ in range(n)
         ]
         self._hover_index = -1
-        self._sss_flags: list[bool] = [False, False, False, False]
-        self._sss_plan_texts: list[str] = ["", "", "", ""]
+        self._sss_flags: list[bool] = [False] * n
+        self._sss_plan_texts: list[str] = [""] * n
         self.setMouseTracking(True)
         self.setExpanding(False)
         self.setDrawBase(False)
@@ -3646,12 +4524,191 @@ class _DiscoveryCard(QFrame):
                 self._btn_layout.insertWidget(0, lbl)
 
 
+def _read_cwd_from_jsonl(project_dir: Path) -> str:
+    """Odczytuje CWD z pierwszego pliku JSONL w katalogu projektu CC."""
+    try:
+        files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not files:
+            return ""
+        # Szukaj w pierwszych 20 liniach pliku — szukamy pola cwd w wiadomości user
+        for line in files[0].read_text(encoding="utf-8", errors="replace").splitlines()[:20]:
+            try:
+                d = json.loads(line)
+                cwd = d.get("cwd", "")
+                if cwd:
+                    return cwd
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""
+
+
+def _scan_recent_cc_projects(max_count: int = 20) -> list[tuple[str, str, float]]:
+    """Skanuje ~/.claude/projects/ i zwraca listę (display_name, cwd_path, mtime).
+
+    Sortuje od najnowszego. Projekty bez rozpoznanego CWD są pomijane.
+    """
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.is_dir():
+        return []
+
+    dirs: list[tuple[float, Path]] = []
+    try:
+        for d in projects_dir.iterdir():
+            if d.is_dir():
+                try:
+                    dirs.append((d.stat().st_mtime, d))
+                except OSError:
+                    pass
+    except OSError:
+        return []
+
+    dirs.sort(reverse=True)
+
+    results: list[tuple[str, str, float]] = []
+    for mtime, d in dirs:
+        if len(results) >= max_count:
+            break
+        cwd = _read_cwd_from_jsonl(d)
+        if not cwd:
+            continue
+        display = Path(cwd).name or d.name
+        results.append((display, cwd, mtime))
+
+    return results
+
+
+class _CompactItemDelegate(QStyledItemDelegate):
+    """Wymusza stałą wysokość wiersza niezależnie od paddingu Qt."""
+    _ROW_H = 14
+
+    def sizeHint(self, option, index):  # type: ignore[override]
+        sh = super().sizeHint(option, index)
+        return sh.__class__(sh.width(), self._ROW_H)
+
+
+class _RecentProjectList(QWidget):
+    """Lista ostatnich 20 projektów CC z obsługą LMB → slot5, RMB → slot6."""
+
+    project_lmb = Signal(str)   # path
+    project_rmb = Signal(str)   # path
+
+    _COLOR_L = "#8b8fa8"   # kolor slotu 5
+    _COLOR_R = "#6e7288"   # kolor slotu 6
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._paths: list[str] = []
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 2, 4)
+        lay.setSpacing(3)
+
+        hdr_row = QHBoxLayout()
+        hdr = QLabel("Ostatnie projekty CC")
+        hdr.setStyleSheet(
+            "color:#484848;font-size:9px;font-weight:bold;"
+            "letter-spacing:1px;background:transparent;"
+        )
+        hdr_row.addWidget(hdr)
+        hdr_row.addStretch()
+
+        btn_refresh = QPushButton("⟳")
+        btn_refresh.setFixedSize(18, 18)
+        btn_refresh.setStyleSheet(
+            "QPushButton{background:transparent;color:#484848;border:none;font-size:10px;}"
+            "QPushButton:hover{color:#888888;}"
+        )
+        btn_refresh.clicked.connect(self.refresh)
+        hdr_row.addWidget(btn_refresh)
+        lay.addLayout(hdr_row)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#242424;background:#242424;")
+        sep.setFixedHeight(1)
+        lay.addWidget(sep)
+
+        # Legenda LMB/RMB
+        legend = QHBoxLayout()
+        for label, color in [("L", self._COLOR_L), ("P", self._COLOR_R)]:
+            lbl = QLabel(f"● {label}")
+            lbl.setStyleSheet(
+                f"color:{color};font-size:8px;background:transparent;"
+            )
+            legend.addWidget(lbl)
+        legend.addStretch()
+        hint = QLabel("LMB / PPM")
+        hint.setStyleSheet("color:#303030;font-size:8px;background:transparent;")
+        legend.addWidget(hint)
+        lay.addLayout(legend)
+
+        self._list = QListWidget()
+        self._list.setStyleSheet(
+            "QListWidget{background:transparent;border:none;outline:none;}"
+            "QListWidget::item{color:#5c6370;font-size:8px;padding:0px 4px;}"
+            "QListWidget::item:hover{background:#1e1e1e;color:#9d9d9d;}"
+            "QListWidget::item:selected{background:#252525;color:#cccccc;}"
+        )
+        self._list.setUniformItemSizes(True)
+        self._list.setItemDelegate(_CompactItemDelegate(self._list))
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._list.verticalScrollBar().setStyleSheet(
+            "QScrollBar:vertical{background:#1a1a1a;width:5px;border:none;}"
+            "QScrollBar::handle:vertical{background:#333333;border-radius:2px;}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+        )
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_rmb)
+        self._list.itemClicked.connect(self._on_lmb)
+        lay.addWidget(self._list, stretch=1)
+
+        # Pasek wskazówki na dole
+        tip = QLabel("LMB → Podgląd L   PPM → Podgląd P")
+        tip.setStyleSheet("color:#2a2a2a;font-size:8px;background:transparent;")
+        tip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(tip)
+
+    def refresh(self) -> None:
+        projects = _scan_recent_cc_projects(20)
+        self._paths = []
+        self._list.clear()
+        for display, cwd, _mtime in projects:
+            self._paths.append(cwd)
+            item = QListWidgetItem()
+            item.setText(display)
+            item.setToolTip(cwd)
+            self._list.addItem(item)
+
+    def _on_lmb(self, item: QListWidgetItem) -> None:
+        idx = self._list.row(item)
+        if 0 <= idx < len(self._paths) and self._paths[idx]:
+            self.project_lmb.emit(self._paths[idx])
+
+    def _on_rmb(self, pos) -> None:
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        idx = self._list.row(item)
+        if 0 <= idx < len(self._paths) and self._paths[idx]:
+            self.project_rmb.emit(self._paths[idx])
+
+
 class _DiscoveryPanel(QWidget):
-    """Prawostronny panel wszystkich wykrytych sesji CC (psutil-based).
+    """Prawostronny panel:
+    - górna połowa: aktywne sesje CC (psutil-based)
+    - dolna połowa: lista 20 ostatnich projektów CC (LMB → slot5, RMB → slot6)
 
     Sesje przypisane do slotów 1–4 są wyróżnione kolorem slotu.
     Sesje wolne mają przyciski promote → Slot N.
     """
+
+    project_lmb = Signal(str)
+    project_rmb = Signal(str)
 
     def __init__(
         self,
@@ -3669,31 +4726,44 @@ class _DiscoveryPanel(QWidget):
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 2, 6)
-        root.setSpacing(4)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setHandleWidth(3)
+        splitter.setStyleSheet(
+            "QSplitter::handle{background:#1e1e1e;}"
+            "QSplitter::handle:hover{background:#2a2a2a;}"
+        )
+
+        # ── Górna część: aktywne sesje ──────────────────────────────────
+        top_w = QWidget()
+        top_w.setStyleSheet("background:transparent;")
+        top_lay = QVBoxLayout(top_w)
+        top_lay.setContentsMargins(6, 6, 2, 4)
+        top_lay.setSpacing(4)
 
         hdr = QLabel("Aktywne sesje CC")
         hdr.setStyleSheet(
             "color:#484848;font-size:9px;font-weight:bold;"
             "letter-spacing:1px;background:transparent;"
         )
-        root.addWidget(hdr)
+        top_lay.addWidget(hdr)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color:#242424;background:#242424;")
         sep.setFixedHeight(1)
-        root.addWidget(sep)
+        top_lay.addWidget(sep)
 
-        # Przewijalna lista kart (max 8 sesji)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setStyleSheet(
             "QScrollArea{border:none;background:transparent;}"
-            "QScrollBar:vertical{background:#1a1a1a;width:6px;border:none;}"
-            "QScrollBar::handle:vertical{background:#333333;border-radius:3px;}"
+            "QScrollBar:vertical{background:#1a1a1a;width:5px;border:none;}"
+            "QScrollBar::handle:vertical{background:#333333;border-radius:2px;}"
             "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
         )
 
@@ -3711,14 +4781,14 @@ class _DiscoveryPanel(QWidget):
 
         cards_layout.addStretch()
         scroll.setWidget(cards_container)
-        root.addWidget(scroll, stretch=1)
+        top_lay.addWidget(scroll, stretch=1)
 
         self._empty_lbl = QLabel("Brak aktywnych\nsesji CC")
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_lbl.setStyleSheet(
             "color:#303030;font-size:10px;background:transparent;"
         )
-        root.addWidget(self._empty_lbl)
+        top_lay.addWidget(self._empty_lbl)
 
         self._no_psutil_lbl = QLabel("Zainstaluj psutil:\npip install psutil")
         self._no_psutil_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3726,15 +4796,26 @@ class _DiscoveryPanel(QWidget):
             "color:#553333;font-size:9px;background:transparent;"
         )
         self._no_psutil_lbl.hide()
-        root.addWidget(self._no_psutil_lbl)
+        top_lay.addWidget(self._no_psutil_lbl)
+
+        splitter.addWidget(top_w)
+
+        # ── Dolna część: ostatnie projekty ──────────────────────────────
+        self._recent = _RecentProjectList()
+        self._recent.project_lmb.connect(self.project_lmb)
+        self._recent.project_rmb.connect(self.project_rmb)
+        splitter.addWidget(self._recent)
+
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+
+        root.addWidget(splitter)
+
+        # Wstępne załadowanie listy
+        QTimer.singleShot(800, self._recent.refresh)
 
     def refresh(self, sessions: list, slot_assignment: dict) -> None:
-        """Odświeża karty dla wszystkich sesji.
-
-        Args:
-            sessions: Lista wszystkich wykrytych sesji CC.
-            slot_assignment: Mapa norm_path(cwd) → slot_id dla slotów 1–4.
-        """
+        """Odświeża karty dla wszystkich sesji."""
         try:
             import psutil  # noqa: F401
             psutil_ok = True
@@ -3762,20 +4843,406 @@ class _DiscoveryPanel(QWidget):
                 card.hide()
         self._empty_lbl.setVisible(len(sessions) == 0)
 
+    def refresh_recent(self) -> None:
+        """Odświeża listę ostatnich projektów."""
+        self._recent.refresh()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _MonitorView(QWidget):
+    """Widok Monitor — lista slotów po lewej, szczegóły po prawej."""
+
+    # kolory faz
+    _PHASE_COLOR = {"working": "#f9c74f", "waiting": "#a6e3a1"}
+    _STATUS_ICON = {"distributed": "✓", "in_plan": "●"}
+    _STATUS_COLOR = {"distributed": "#6c7086", "in_plan": "#cdd6f4"}
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._selected_idx: int = 0       # wybrany slot (0-based)
+        self._slots_data: list[dict] = []  # cache ostatnich danych
+        self._build_ui()
+
+    # ── Budowanie UI ──────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Lewa: lista slotów ────────────────────────────────────────
+        left = QWidget()
+        left.setFixedWidth(170)
+        left.setStyleSheet("background:#13131e;border-right:1px solid #2a2a3a;")
+        llay = QVBoxLayout(left)
+        llay.setContentsMargins(0, 6, 0, 6)
+        llay.setSpacing(2)
+
+        self._slot_btns: list[QPushButton] = []
+        for i in range(len(SLOT_COLORS)):
+            btn = QPushButton()
+            btn.setCheckable(True)
+            btn.setFlat(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(self._btn_style(SLOT_COLORS[i], checked=False))
+            btn.clicked.connect(lambda _c, idx=i: self._select(idx))
+            btn.setMinimumHeight(52)
+            btn.setMaximumHeight(68)
+            self._slot_btns.append(btn)
+            llay.addWidget(btn)
+
+        llay.addStretch()
+        root.addWidget(left)
+
+        # ── Prawa: szczegóły ──────────────────────────────────────────
+        right = QWidget()
+        right.setStyleSheet("background:#181825;")
+        rlay = QVBoxLayout(right)
+        rlay.setContentsMargins(14, 12, 14, 12)
+        rlay.setSpacing(6)
+
+        # nagłówek szczegółów
+        hdr = QHBoxLayout()
+        self._det_name = QLabel("—", styleSheet="color:#cdd6f4;font-size:13px;font-weight:bold;")
+        self._det_badge = QLabel("", styleSheet=(
+            "color:#cba6f7;font-size:9px;font-weight:bold;"
+            "background:#2a2040;border-radius:3px;padding:1px 5px;"
+        ))
+        self._det_phase = QLabel("", styleSheet="color:#585b70;font-size:10px;")
+        hdr.addWidget(self._det_name, stretch=1)
+        hdr.addWidget(self._det_badge)
+        hdr.addWidget(self._det_phase)
+        rlay.addLayout(hdr)
+
+        self._det_path = QLabel("", styleSheet="color:#3a3a5a;font-size:9px;")
+        self._det_path.setWordWrap(True)
+        rlay.addWidget(self._det_path)
+
+        # separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("QFrame{color:#2a2a3a;margin:2px 0;}")
+        rlay.addWidget(sep)
+
+        # ── Stack: SSS / Plain / Pusty ────────────────────────────────
+        self._stack = QStackedWidget()
+
+        # strona 0 — SSS
+        sss_page = QWidget()
+        sss_lay = QVBoxLayout(sss_page)
+        sss_lay.setContentsMargins(0, 0, 0, 0)
+        sss_lay.setSpacing(6)
+
+        # meta SSS
+        self._sss_meta = QLabel("", styleSheet="color:#89b4fa;font-size:10px;")
+        sss_lay.addWidget(self._sss_meta)
+
+        # nagłówek bufora
+        buf_hdr = QLabel("BUFOR", styleSheet=(
+            "color:#6c7086;font-size:9px;font-weight:bold;letter-spacing:1px;"
+        ))
+        sss_lay.addWidget(buf_hdr)
+
+        # lista wpisów bufora (scrollowalny obszar)
+        buf_scroll = QScrollArea()
+        buf_scroll.setWidgetResizable(True)
+        buf_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        buf_scroll.setStyleSheet("background:transparent;")
+        self._buf_widget = QWidget()
+        self._buf_widget.setStyleSheet("background:transparent;")
+        self._buf_layout = QVBoxLayout(self._buf_widget)
+        self._buf_layout.setContentsMargins(0, 0, 0, 0)
+        self._buf_layout.setSpacing(3)
+        self._buf_layout.addStretch()
+        buf_scroll.setWidget(self._buf_widget)
+        sss_lay.addWidget(buf_scroll, stretch=1)
+        self._stack.addWidget(sss_page)    # idx 0
+
+        # strona 1 — zwykły projekt CC
+        plain_page = QWidget()
+        plain_lay = QVBoxLayout(plain_page)
+        plain_lay.setContentsMargins(0, 0, 0, 0)
+        plain_lay.setSpacing(8)
+        self._plain_meta = QLabel("", styleSheet="color:#9cdcfe;font-size:10px;")
+        self._plain_meta.setWordWrap(True)
+        plain_lay.addWidget(self._plain_meta)
+        msg_lbl = QLabel("Ostatnia wiadomość:", styleSheet="color:#6c7086;font-size:9px;font-weight:bold;letter-spacing:1px;")
+        plain_lay.addWidget(msg_lbl)
+        self._plain_msg = QPlainTextEdit()
+        self._plain_msg.setReadOnly(True)
+        self._plain_msg.setFont(_FONT_MONO)
+        self._plain_msg.setStyleSheet(
+            "QPlainTextEdit{background:#13131e;color:#cdd6f4;font-size:10px;"
+            "border:none;border-radius:3px;padding:6px;}"
+        )
+        plain_lay.addWidget(self._plain_msg, stretch=1)
+        self._stack.addWidget(plain_page)  # idx 1
+
+        # strona 2 — pusty slot
+        empty_page = QWidget()
+        empty_lay = QVBoxLayout(empty_page)
+        empty_lbl = QLabel("Brak projektu w tym slocie.")
+        empty_lbl.setStyleSheet("color:#3a3a5a;font-size:11px;")
+        empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_lay.addWidget(empty_lbl)
+        self._stack.addWidget(empty_page)  # idx 2
+
+        rlay.addWidget(self._stack, stretch=1)
+        root.addWidget(right, stretch=1)
+
+    # ── Pomocnicze ───────────────────────────────────────────────────────
+
+    def _btn_style(self, color: str, checked: bool) -> str:
+        bg = f"{color}22" if checked else "transparent"
+        border = f"border-left:3px solid {color};" if checked else f"border-left:3px solid {color}44;"
+        return (
+            f"QPushButton{{background:{bg};{border}"
+            f"border-top:none;border-right:none;border-bottom:none;"
+            f"color:#cdd6f4;font-size:10px;text-align:left;padding:4px 10px;}}"
+            f"QPushButton:hover{{background:{color}18;}}"
+        )
+
+    def _select(self, idx: int) -> None:
+        self._selected_idx = idx
+        for i, btn in enumerate(self._slot_btns):
+            btn.setChecked(i == idx)
+            btn.setStyleSheet(self._btn_style(SLOT_COLORS[i], checked=(i == idx)))
+        self._render_detail()
+        # Przełącz slot w CCLauncherPanel
+        p = self.parent()
+        while p is not None:
+            if hasattr(p, "_slot_tabs"):
+                p._slot_tabs.setCurrentIndex(idx)
+                break
+            p = p.parent()
+
+    def _render_list(self) -> None:
+        """Aktualizuje etykiety przycisków listy slotów."""
+        for i, d in enumerate(self._slots_data):
+            path = d.get("path", "")
+            is_sss = d.get("is_sss", False)
+            name = d.get("name") or (Path(path).name if path else "—")
+            phase = d.get("phase", "")
+            phase_dot = "● " if phase == "working" else ("○ " if phase == "waiting" else "  ")
+            phase_col = self._PHASE_COLOR.get(phase, "#585b70")
+
+            badge = " [SSS]" if is_sss else ""
+            sss_info = ""
+            if is_sss and d.get("ssm"):
+                s = d["ssm"]
+                sss_info = f"\nR{s.current_round or '?'}  ·  sesja {s.session_count}  ·  next {s.next_count}"
+
+            btn = self._slot_btns[i]
+            # Użyj rich text przez HTML (QPushButton nie obsługuje) → QLabel wewnątrz
+            # Uproszczamy: plain text wieloliniowy
+            line1 = f"T{i+1}  {name}{badge}"
+            line2 = f"{phase_dot}{phase or 'offline'}{sss_info}"
+            btn.setText(f"{line1}\n{line2}")
+            btn.setStyleSheet(self._btn_style(SLOT_COLORS[i], checked=(i == self._selected_idx)))
+            # Kolor fazy — ustawiamy przez tooltip (nie zmieniamy koloru tekstu per-linia)
+            btn.setToolTip(path)
+
+    def _render_detail(self) -> None:
+        """Renderuje prawą stronę dla wybranego slotu."""
+        if not self._slots_data or self._selected_idx >= len(self._slots_data):
+            self._stack.setCurrentIndex(2)
+            return
+
+        d = self._slots_data[self._selected_idx]
+        path = d.get("path", "")
+        is_sss = d.get("is_sss", False)
+        name = d.get("name") or (Path(path).name if path else "—")
+        phase = d.get("phase", "")
+        snap = d.get("snap")
+        ssm = d.get("ssm")
+
+        self._det_name.setText(name)
+        self._det_badge.setText("SSS" if is_sss else "CC")
+        self._det_badge.setStyleSheet(
+            "color:#cba6f7;font-size:9px;font-weight:bold;"
+            "background:#2a2040;border-radius:3px;padding:1px 5px;"
+            if is_sss else
+            "color:#89dceb;font-size:9px;font-weight:bold;"
+            "background:#0d2030;border-radius:3px;padding:1px 5px;"
+        )
+        phase_col = self._PHASE_COLOR.get(phase, "#585b70")
+        phase_txt = f"● {phase}" if phase else "● offline"
+        self._det_phase.setText(phase_txt)
+        self._det_phase.setStyleSheet(f"color:{phase_col};font-size:10px;")
+        self._det_path.setText(path or "brak ścieżki")
+
+        if not path:
+            self._stack.setCurrentIndex(2)
+            return
+
+        if is_sss:
+            self._stack.setCurrentIndex(0)
+            self._render_sss(ssm, snap)
+        else:
+            self._stack.setCurrentIndex(1)
+            self._render_plain(snap)
+
+    def _render_sss(self, ssm, snap) -> None:
+        if ssm is not None:
+            runda = ssm.current_round or "—"
+            sesja = ssm.session_count
+            nxt = ssm.next_count
+            done = ssm.done_count
+            last_ts = ssm.last_event_timestamp[:16].replace("T", " ") if ssm.last_event_timestamp else "—"
+            self._sss_meta.setText(
+                f"Runda: {runda}  ·  sesja: {sesja}  ·  next: {nxt}  ·  done: {done}  ·  ostatni event: {last_ts}"
+            )
+        else:
+            self._sss_meta.setText("Brak danych SSM — uruchom projekt i zainstaluj hook SSM")
+
+        # Wyczyść bufor
+        while self._buf_layout.count() > 1:
+            item = self._buf_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        entries = ssm.buffer_entries if ssm else []
+        if not entries:
+            lbl = QLabel("Bufor jest pusty.")
+            lbl.setStyleSheet("color:#3a3a5a;font-size:10px;padding:4px 0;")
+            self._buf_layout.insertWidget(0, lbl)
+            return
+
+        # Grupujemy: najpierw in_plan (aktywne), potem distributed (rozdzielone)
+        active = [e for e in entries if e.status == "in_plan"]
+        done_e = [e for e in entries if e.status == "distributed"]
+
+        row_idx = 0
+        if active:
+            sep_lbl = QLabel(f"AKTYWNE W PLANIE  ({len(active)})",
+                styleSheet="color:#6c7086;font-size:8px;font-weight:bold;letter-spacing:1px;padding:4px 0 2px;")
+            self._buf_layout.insertWidget(row_idx, sep_lbl)
+            row_idx += 1
+            for entry in active:
+                self._buf_layout.insertWidget(row_idx, self._make_entry_widget(entry))
+                row_idx += 1
+
+        if done_e:
+            sep_lbl2 = QLabel(f"ROZDZIELONE  ({len(done_e)})",
+                styleSheet="color:#3a3a5a;font-size:8px;font-weight:bold;letter-spacing:1px;padding:6px 0 2px;")
+            self._buf_layout.insertWidget(row_idx, sep_lbl2)
+            row_idx += 1
+            for entry in done_e:
+                self._buf_layout.insertWidget(row_idx, self._make_entry_widget(entry))
+                row_idx += 1
+
+    def _make_entry_widget(self, entry) -> QFrame:
+        is_done = entry.status == "distributed"
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame{background:#1e1e2e;border-radius:3px;border:1px solid #2a2a3a;}"
+            if not is_done else
+            "QFrame{background:#13131e;border-radius:3px;border:1px solid #1a1a2a;}"
+        )
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(8, 5, 8, 5)
+        lay.setSpacing(2)
+
+        # Wiersz 1: ikona + target + czas
+        top = QHBoxLayout()
+        icon = "✓" if is_done else "●"
+        icon_col = "#3a3a5a" if is_done else "#cba6f7"
+        target_col = "#3a3a5a" if is_done else "#89b4fa"
+        lbl_icon = QLabel(icon, styleSheet=f"color:{icon_col};font-size:11px;font-weight:bold;")
+        lbl_icon.setFixedWidth(14)
+        lbl_target = QLabel(f"[{entry.target}]", styleSheet=f"color:{target_col};font-size:10px;font-weight:bold;")
+        ts = entry.timestamp[:16].replace("T", " ") if entry.timestamp else ""
+        lbl_ts = QLabel(ts, styleSheet="color:#2a2a4a;font-size:9px;")
+        top.addWidget(lbl_icon)
+        top.addWidget(lbl_target)
+        top.addStretch()
+        top.addWidget(lbl_ts)
+        lay.addLayout(top)
+
+        # Wiersz 2: treść
+        content_col = "#585b70" if is_done else "#cdd6f4"
+        lbl_content = QLabel(entry.content)
+        lbl_content.setStyleSheet(f"color:{content_col};font-size:10px;")
+        lbl_content.setWordWrap(True)
+        lay.addWidget(lbl_content)
+
+        # Wiersz 3 (tylko distributed): gdzie trafiło
+        if is_done and entry.distributed_to:
+            lbl_dest = QLabel(f"→ {entry.distributed_to}", styleSheet="color:#3a3a5a;font-size:9px;")
+            lay.addWidget(lbl_dest)
+
+        return frame
+
+    def _render_plain(self, snap) -> None:
+        if snap and not snap.is_file_missing:
+            parts = []
+            if snap.model:
+                parts.append(f"model: {snap.model}")
+            if snap.cost_usd is not None:
+                parts.append(f"koszt: ${snap.cost_usd:.4f}")
+            if snap.ctx_pct is not None:
+                parts.append(f"ctx: {snap.ctx_pct:.1f}%")
+            self._plain_meta.setText("  ·  ".join(parts) if parts else "—")
+            self._plain_msg.setPlainText(snap.last_message or "")
+        else:
+            self._plain_meta.setText("offline")
+            self._plain_msg.setPlainText("")
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def refresh(
+        self,
+        slots,
+        snaps: dict,
+        ssm_snaps: dict,
+        active_idx: int,
+    ) -> None:
+        self._slots_data = []
+        for i, slot in enumerate(slots):
+            cfg = slot.get_config()
+            path = cfg.project_path.strip()
+            snap = snaps.get(i + 1)
+            phase = ""
+            if snap and not snap.is_file_missing:
+                phase = snap.phase or ""
+
+            ssm_snap = None
+            if slot._is_sss and path:
+                try:
+                    from src.watchers.process_scanner import norm_path as _np
+                    ssm_snap = ssm_snaps.get(_np(path))
+                except Exception:
+                    pass
+
+            self._slots_data.append({
+                "path": path,
+                "is_sss": slot._is_sss,
+                "name": slot._sss_name if slot._is_sss else "",
+                "phase": phase,
+                "snap": snap,
+                "ssm": ssm_snap,
+            })
+
+        self._render_list()
+        self._render_detail()
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 
 class CCLauncherPanel(QWidget):
-    """Główny panel 'Sesje CC' z 4 zakładkami slotów projektów."""
+    """Główny panel 'Sesje CC' z 6 zakładkami slotów projektów (4 robocze + 2 podglądu)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._config = load_launcher_config()
         self._watcher = SessionWatcher(parent=self)
         self._slots: list[ProjectSlotWidget] = []
-        self._plan_watchers: list[object] = [None, None, None, None]  # _SSSPlanWatcher per slot
+        self._plan_watchers: list[object] = [None] * 6  # _SSSPlanWatcher per slot
+        self._snap_cache: dict[int, TerminalSnapshot] = {}  # slot_id → last snapshot
 
         self._active_cwds: set[str] = set()
+        self._last_launch: dict[int, float] = {}
 
         self._setup_ui()
         self._connect_signals()
@@ -3795,19 +5262,40 @@ class CCLauncherPanel(QWidget):
         self._slot_tabs = QTabWidget()
         self._slot_tab_bar = _ColoredSlotTabBar(SLOT_COLORS)
         self._slot_tabs.setTabBar(self._slot_tab_bar)
+
+        # Sloty 1–4: robocze (mają konfigurację)
         for i in range(4):
             slot = ProjectSlotWidget(i + 1, self._config.slots[i], parent=self)
             self._slots.append(slot)
             self._slot_tabs.addTab(slot, SLOT_NAMES[i])
             path = self._config.slots[i].project_path
             self._slot_tab_bar.setSubLabel(i, Path(path).name if path else "—")
+
+        # Sloty 5–6: podgląd (puste konfiguracje, szare kolory)
+        from src.cc_launcher.launcher_config import SlotConfig as _SlotConfig
+        for i in range(4, 6):
+            slot = ProjectSlotWidget(i + 1, _SlotConfig(), parent=self)
+            self._slots.append(slot)
+            self._slot_tabs.addTab(slot, SLOT_NAMES[i])
+            self._slot_tab_bar.setSubLabel(i, "—")
+
         self._slot_tab_bar.folder_change_requested.connect(self._on_tab_folder_change)
+
+        # MonitorView — jedna instancja per slot, wstawiana do wewnętrznego QTabWidget Config+Monitor
+        self._monitor_views: list[_MonitorView] = []
+        for slot in self._slots:
+            mv = _MonitorView(parent=slot)
+            self._monitor_views.append(mv)
+            slot.set_monitor_widget(mv)
+        self._slot_tabs.currentChanged.connect(self._on_slot_tab_changed)
 
         self._discovery_panel = _DiscoveryPanel(
             self._get_free_slots,
             self._promote_to_slot,
             parent=self,
         )
+        self._discovery_panel.project_lmb.connect(self._on_recent_lmb)
+        self._discovery_panel.project_rmb.connect(self._on_recent_rmb)
 
         content = QWidget()
         content_row = QHBoxLayout(content)
@@ -3816,6 +5304,31 @@ class CCLauncherPanel(QWidget):
         content_row.addWidget(self._slot_tabs, stretch=1)
         content_row.addWidget(self._discovery_panel)
         root.addWidget(content, stretch=1)
+
+    # ── Sloty podglądu (5 = LMB, 6 = RMB) ───────────────────────────────────
+
+    def _set_preview_slot(self, slot_idx: int, path: str) -> None:
+        """Ustawia ścieżkę projektu w slocie podglądu (4 = slot5, 5 = slot6)."""
+        if not path or not Path(path).is_dir():
+            return
+        slot = self._slots[slot_idx]
+        slot._path_edit.setPlainText(path)
+        slot.reload_plan()
+        slot.reload_pcc()
+        slot.reload_stats()
+        slot.reload_history()
+        slot.reload_md_files()
+        slot.reload_jsonl_transcript()
+        slot._notify_sss(path)
+        self._slot_tab_bar.setSubLabel(slot_idx, Path(path).name)
+        # Przełącz na ten slot żeby user od razu widział zawartość
+        self._slot_tabs.setCurrentIndex(slot_idx)
+
+    def _on_recent_lmb(self, path: str) -> None:
+        self._set_preview_slot(4, path)  # slot 5 (indeks 4)
+
+    def _on_recent_rmb(self, path: str) -> None:
+        self._set_preview_slot(5, path)  # slot 6 (indeks 5)
 
     def _build_header(self) -> QWidget:
         w = QWidget()
@@ -3946,7 +5459,7 @@ class CCLauncherPanel(QWidget):
         synced_to_cm = 0
         synced_to_cc = 0
 
-        for i, slot in enumerate(self._slots):
+        for i, slot in enumerate(self._slots[:4]):
             cm_path = slot.get_config().project_path.strip()
             cc_path = cc_paths[i].strip()
 
@@ -4009,6 +5522,9 @@ class CCLauncherPanel(QWidget):
             self._slots[idx]._on_browse()
 
     def _connect_signals(self) -> None:
+        if getattr(self, "_signals_connected", False):
+            print("[CC Launcher] WARNING: _connect_signals called more than once!")
+        self._signals_connected = True
         self._watcher.snapshot_updated.connect(self._on_snapshot)
         for slot in self._slots:
             slot.config_changed.connect(self._on_config_changed)
@@ -4017,13 +5533,49 @@ class CCLauncherPanel(QWidget):
             slot.stop_requested.connect(self._on_stop)
             slot.stop_completed.connect(self._on_stop_completed)
             slot.sss_detected.connect(self._on_sss_detected)
+            slot._tabs.currentChanged.connect(self._on_section_tab_changed)
 
         # Wykryj SSS v2 dla slotów już wczytanych z konfiguracji
         from PySide6.QtCore import QTimer as _QT
         _QT.singleShot(0, self._detect_sss_all_slots)
 
+    def _on_slot_tab_changed(self, idx: int) -> None:
+        """Odświeża Monitor gdy user przełączy slot. Zachowuje aktywną sekcję."""
+        # Zachowaj indeks sekcji z poprzedniego slotu i ustaw go w nowym
+        prev_section = getattr(self, "_last_section_idx", 0)
+        self._slots[idx]._tabs.setCurrentIndex(prev_section)
+        self._refresh_monitor()
+
+    def _on_section_tab_changed(self, section_idx: int) -> None:
+        """Zapamiętuje aktywną sekcję przy każdej zmianie."""
+        self._last_section_idx = section_idx
+
+    def _refresh_monitor(self) -> None:
+        # ssm_snaps: norm(path) → ProjectSnapshot
+        ssm_snaps: dict = {}
+        if _SSM_AVAILABLE:
+            try:
+                from src.ssm_module.core.ssm_service import SSMService as _Svc
+                from src.watchers.process_scanner import norm_path as _np
+                svc = _Svc.instance()
+                for entry in svc.projects():
+                    s = svc.snapshot(entry.project_id)
+                    if s is not None:
+                        ssm_snaps[_np(entry.path)] = s
+            except Exception:
+                pass
+        active_idx = self._slot_tabs.currentIndex()
+        for mv in self._monitor_views:
+            mv.refresh(
+                slots=self._slots,
+                snaps=self._snap_cache,
+                ssm_snaps=ssm_snaps,
+                active_idx=active_idx,
+            )
+
     def _on_snapshot(self, snap: TerminalSnapshot) -> None:
         self._slots[snap.slot_id - 1].update_snapshot(snap)
+        self._snap_cache[snap.slot_id] = snap
 
         # Weryfikacja procesem — jeśli CC nie działa w tym folderze, wymuś offline
         from src.watchers.process_scanner import norm_path
@@ -4053,9 +5605,10 @@ class CCLauncherPanel(QWidget):
             elapsed=elapsed,
             is_missing=snap.is_file_missing or not has_proc,
         )
+        self._refresh_monitor()
 
     def _on_config_changed(self) -> None:
-        for i, slot in enumerate(self._slots):
+        for i, slot in enumerate(self._slots[:4]):
             self._config.slots[i] = slot.get_config()
             path = self._config.slots[i].project_path
             if not slot._is_sss:
@@ -4070,7 +5623,7 @@ class CCLauncherPanel(QWidget):
         """
         from pathlib import Path as _Path
         target = 1
-        for i, slot in enumerate(self._slots):
+        for i, slot in enumerate(self._slots[:4]):
             if not slot.get_config().project_path.strip():
                 target = i + 1
                 break
@@ -4085,9 +5638,9 @@ class CCLauncherPanel(QWidget):
         return target
 
     def _get_free_slots(self) -> list[int]:
-        """Zwraca numery slotów (1–4) bez przypisanego projektu."""
+        """Zwraca numery slotów roboczych (1–4) bez przypisanego projektu."""
         return [
-            i + 1 for i, slot in enumerate(self._slots)
+            i + 1 for i, slot in enumerate(self._slots[:4])
             if not slot.get_config().project_path.strip()
         ]
 
@@ -4126,7 +5679,21 @@ class CCLauncherPanel(QWidget):
         self._on_config_changed()
         QTimer.singleShot(500, self._scan_discovered)
 
+    _LAUNCH_DEBOUNCE_S: float = 5.0
+
     def _on_launch(self, slot_id: int) -> None:
+        now = time.monotonic()
+        last = self._last_launch.get(slot_id, 0.0)
+        elapsed = now - last
+        print(
+            f"[CC Launcher] _on_launch slot={slot_id} terminals={self._config.terminal_count}"
+            f" ts={now:.3f} elapsed_since_last={elapsed:.2f}s"
+        )
+        if elapsed < self._LAUNCH_DEBOUNCE_S:
+            print(f"[CC Launcher] _on_launch slot={slot_id} DEBOUNCE (elapsed={elapsed:.2f}s < {self._LAUNCH_DEBOUNCE_S}s)")
+            return
+        self._last_launch[slot_id] = now
+
         cfg = self._config.slots[slot_id - 1]
         if not cfg.project_path:
             QMessageBox.warning(
@@ -4153,6 +5720,7 @@ class CCLauncherPanel(QWidget):
             model=cfg.model,
             permission_flag=CC_PERMISSION_MODES.get(cfg.permission_mode, ""),
             pre_command=cfg.pre_command,
+            cc_flags=cfg.cc_flags,
         )
         if not ok:
             QMessageBox.critical(
@@ -4205,6 +5773,8 @@ class CCLauncherPanel(QWidget):
     def _on_sss_detected(self, slot_id: int, is_sss: bool, project_name: str) -> None:
         """Obsługuje wykrycie (lub brak) projektu SSS v2 w slocie."""
         idx = slot_id - 1
+        if idx >= len(self._config.slots):
+            return  # preview slots (5, 6) nie mają SlotConfig w konfiguracji
         self._slot_tab_bar.setSssFlag(idx, is_sss)
 
         # Sub-label zawsze pokazuje nazwę folderu — badge SSS informuje o typie projektu
@@ -4233,6 +5803,8 @@ class CCLauncherPanel(QWidget):
                 )
                 watcher.start()
                 self._plan_watchers[idx] = watcher
+
+        self._refresh_monitor()
 
     def _on_plan_changed(self, slot_idx: int, sections: dict) -> None:
         """Aktualizuje tekst planu w tab barze po zmianie PLAN.md."""
@@ -4274,14 +5846,15 @@ class CCLauncherPanel(QWidget):
     # Nawigacja do zakładek SSM / SSC w aktywnym slocie                    #
     # ------------------------------------------------------------------ #
 
-    _TAB_SSM_IN_SLOT = 1   # indeks zakładki "Monitor" w ProjectSlotWidget
-    _TAB_SSC_IN_SLOT = 10  # indeks zakładki "Full Converter" (SSC) w ProjectSlotWidget
+    _TAB_SSC_IN_SLOT = 7   # indeks zewnętrznej zakładki "Full Converter" w ProjectSlotWidget
 
     def show_ssm_tab(self) -> None:
-        """Przełącza aktywny slot na zakładkę SSS (SSM Monitor)."""
+        """Przełącza aktywny slot na zakładkę Monitor (wewnątrz Config)."""
         idx = self._slot_tabs.currentIndex()
         if 0 <= idx < len(self._slots):
-            self._slots[idx]._tabs.setCurrentIndex(self._TAB_SSM_IN_SLOT)
+            slot = self._slots[idx]
+            slot._tabs.setCurrentIndex(0)           # zewnętrzna: Config
+            slot._inner_config_tabs.setCurrentIndex(1)  # wewnętrzna: Monitor
 
     def show_ssc_tab(self) -> None:
         """Przełącza aktywny slot na zakładkę Full Converter (SSC)."""

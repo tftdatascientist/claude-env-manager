@@ -4,7 +4,7 @@ import datetime
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QSplitter, QVBoxLayout, QWidget
 
 from razd.tracker.activity_classifier import (
     ACTIVITY_ALPHA,
@@ -14,6 +14,7 @@ from razd.tracker.activity_classifier import (
     classify_events,
     fill_gaps,
 )
+from razd.ui.stats_widget import RazdMonthlyStatsWidget, RazdWeeklyStatsWidget
 from razd.ui.timeline_widget import RazdVerticalTimeline
 
 if TYPE_CHECKING:
@@ -26,6 +27,8 @@ class RazdTimelineTab(QWidget):
     def __init__(self, repo: RazdRepository | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._repo = repo
+        self._weekly_stats: RazdWeeklyStatsWidget | None = None
+        self._monthly_stats: RazdMonthlyStatsWidget | None = None
         self._build_ui()
 
         # Odświeżaj co 60s (nie za często — DB query)
@@ -39,6 +42,10 @@ class RazdTimelineTab(QWidget):
 
     def set_repo(self, repo: RazdRepository) -> None:
         self._repo = repo
+        if self._weekly_stats is not None:
+            self._weekly_stats.set_repo(repo)
+        if self._monthly_stats is not None:
+            self._monthly_stats.set_repo(repo)
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -67,8 +74,18 @@ class RazdTimelineTab(QWidget):
         root.addWidget(splitter)
 
     def _build_sidebar(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
+        outer = QWidget()
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
@@ -117,14 +134,43 @@ class RazdTimelineTab(QWidget):
             row.addLayout(text_col, 1)
             layout.addLayout(row)
 
+        layout.addSpacing(8)
+
+        def _sep() -> QLabel:
+            s = QLabel()
+            s.setFixedHeight(1)
+            s.setStyleSheet("background: #333;")
+            return s
+
+        # --- Statystyki tygodnia ---
+        layout.addWidget(_sep())
+        stats_week_title = QLabel("Statystyki tygodnia")
+        stats_week_title.setStyleSheet("color: #aaa; font-size: 11px; font-weight: bold;")
+        layout.addWidget(stats_week_title)
+        self._weekly_stats = RazdWeeklyStatsWidget(self._repo)
+        layout.addWidget(self._weekly_stats)
+
+        layout.addSpacing(4)
+
+        # --- Statystyki miesiąca ---
+        layout.addWidget(_sep())
+        stats_month_title = QLabel("Statystyki miesiąca (30 dni)")
+        stats_month_title.setStyleSheet("color: #aaa; font-size: 11px; font-weight: bold;")
+        layout.addWidget(stats_month_title)
+        self._monthly_stats = RazdMonthlyStatsWidget(self._repo)
+        layout.addWidget(self._monthly_stats)
+
         layout.addStretch()
 
-        # Last refresh info
-        self._last_refresh_lbl = QLabel("—")
-        self._last_refresh_lbl.setStyleSheet("color: #555; font-size: 9px;")
-        layout.addWidget(self._last_refresh_lbl)
+        scroll.setWidget(inner)
+        outer_layout.addWidget(scroll, 1)
 
-        return w
+        # Last refresh info — poza scroll area (zawsze widoczne)
+        self._last_refresh_lbl = QLabel("—")
+        self._last_refresh_lbl.setStyleSheet("color: #555; font-size: 9px; padding: 2px 12px;")
+        outer_layout.addWidget(self._last_refresh_lbl)
+
+        return outer
 
     # ------------------------------------------------------------------
 

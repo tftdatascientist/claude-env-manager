@@ -33,6 +33,7 @@ class NotionSettings:
     enabled: bool = False
     sync_interval_mins: int = 15
     export_urls: bool = False
+    projects_db_id: str = ""  # ID bazy projektów w Notion (RAZD_NOTION_PROJECTS_DB_ID)
 
 
 @dataclass
@@ -83,6 +84,7 @@ class RazdSettings:
                 enabled=n.get("enabled", False),
                 sync_interval_mins=n.get("sync_interval_mins", 15),
                 export_urls=n.get("export_urls", False),
+                projects_db_id=n.get("projects_db_id", ""),
             ),
             db_path=db_path,
             break_interval_min=d.get("break", {}).get("work_interval_min", 50),

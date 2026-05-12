@@ -14,10 +14,11 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QProcess, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
-    QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFileSystemModel,
+    QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
+    QSizePolicy, QSplitter, QStackedWidget, QTextBrowser, QTreeView,
+    QVBoxLayout, QWidget,
 )
 
 from src.projektant.template_parser import (
@@ -1314,6 +1315,211 @@ class SssRundaWstepnaPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# ExplorerSection — drzewko plików + podgląd
+# ---------------------------------------------------------------------------
+
+class ExplorerSection(QWidget):
+    """QSplitter z drzewkiem plików (30%) + podgląd po prawej (70%)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project_path: Path | None = None
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        hdr = QLabel("Explorer")
+        hdr.setStyleSheet(
+            "color:#e5c07b;font-size:11px;font-weight:bold;"
+            "padding:4px 6px;background:#21252b;border-bottom:1px solid #3e4451;"
+        )
+        root.addWidget(hdr)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Drzewko plików
+        self._model = QFileSystemModel()
+        self._model.setReadOnly(True)
+        self._tree = QTreeView()
+        self._tree.setModel(self._model)
+        self._tree.setHeaderHidden(True)
+        for col in range(1, 4):
+            self._tree.setColumnHidden(col, True)
+        self._tree.setStyleSheet(
+            "QTreeView{background:#1a1d23;color:#abb2bf;border:none;font-size:11px;}"
+            "QTreeView::item:selected{background:#3e4451;color:#e5c07b;}"
+            "QTreeView::item:hover{background:#2c313a;}"
+        )
+        self._tree.clicked.connect(self._on_node_clicked)
+        splitter.addWidget(self._tree)
+
+        # Panel podglądu
+        self._preview_stack = QStackedWidget()
+
+        self._md_browser = QTextBrowser()
+        self._md_browser.setStyleSheet(
+            "QTextBrowser{background:#1e2127;color:#abb2bf;border:none;font-size:11px;}"
+        )
+        self._md_browser.setOpenExternalLinks(False)
+        self._preview_stack.addWidget(self._md_browser)   # index 0
+
+        self._code_edit = QPlainTextEdit()
+        self._code_edit.setReadOnly(True)
+        self._code_edit.setFont(QFont("Consolas", 10))
+        self._code_edit.setStyleSheet(
+            "QPlainTextEdit{background:#1e2127;color:#abb2bf;border:none;}"
+        )
+        self._code_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._preview_stack.addWidget(self._code_edit)    # index 1
+
+        self._unavail_lbl = QLabel("Podgląd niedostępny")
+        self._unavail_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._unavail_lbl.setStyleSheet("color:#5c6370;font-size:12px;")
+        self._preview_stack.addWidget(self._unavail_lbl)  # index 2
+
+        self._preview_stack.setCurrentIndex(2)
+        splitter.addWidget(self._preview_stack)
+
+        total = 1000
+        splitter.setSizes([int(total * 0.30), int(total * 0.70)])
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        root.addWidget(splitter, 1)
+
+    def set_project(self, path: Path) -> None:
+        self._project_path = path
+        root_path = str(path)
+        # Odepnij poprzedni handler jeśli istnieje
+        if hasattr(self, '_dir_loaded_handler'):
+            try:
+                self._model.directoryLoaded.disconnect(self._dir_loaded_handler)
+            except RuntimeError:
+                pass
+        root_index = self._model.setRootPath(root_path)
+        self._tree.setRootIndex(self._model.index(root_path))
+        self._preview_stack.setCurrentIndex(2)
+
+        def _on_loaded(_dir: str) -> None:
+            try:
+                self._model.directoryLoaded.disconnect(self._dir_loaded_handler)
+            except RuntimeError:
+                pass
+            self._tree.setRootIndex(self._model.index(root_path))
+            self._tree.expandToDepth(0)
+
+        self._dir_loaded_handler = _on_loaded
+        self._model.directoryLoaded.connect(_on_loaded)
+
+    def _on_node_clicked(self, index) -> None:
+        file_path = Path(self._model.filePath(index))
+        if not file_path.is_file():
+            return
+        suffix = file_path.suffix.lower()
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            self._preview_stack.setCurrentIndex(2)
+            return
+        if suffix == ".md":
+            self._md_browser.setMarkdown(text)
+            self._preview_stack.setCurrentIndex(0)
+        elif suffix == ".py":
+            self._code_edit.setPlainText(text)
+            self._preview_stack.setCurrentIndex(1)
+        else:
+            self._preview_stack.setCurrentIndex(2)
+
+
+# ---------------------------------------------------------------------------
+# ReadmeSection — podgląd README.md
+# ---------------------------------------------------------------------------
+
+class ReadmeSection(QWidget):
+    """QTextBrowser ładujący README.md projektu (read-only Markdown)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project_path: Path | None = None
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        hdr = QLabel("README.md")
+        hdr.setStyleSheet(
+            "color:#e5c07b;font-size:11px;font-weight:bold;"
+            "padding:4px 6px;background:#21252b;border-bottom:1px solid #3e4451;"
+        )
+        root.addWidget(hdr)
+
+        self._browser = QTextBrowser()
+        self._browser.setStyleSheet(
+            "QTextBrowser{background:#1e2127;color:#abb2bf;border:none;font-size:11px;padding:6px;}"
+        )
+        self._browser.setOpenExternalLinks(False)
+        root.addWidget(self._browser, 1)
+
+    def set_project(self, path: Path) -> None:
+        self._project_path = path
+        readme = path / "README.md"
+        if readme.exists():
+            try:
+                self._browser.setMarkdown(readme.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                self._browser.setPlainText("Błąd odczytu README.md")
+        else:
+            self._browser.setPlainText("Brak README.md")
+
+
+# ---------------------------------------------------------------------------
+# ChangelogSection — podgląd CHANGELOG.md
+# ---------------------------------------------------------------------------
+
+class ChangelogSection(QWidget):
+    """QTextBrowser ładujący CHANGELOG.md projektu (read-only Markdown)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project_path: Path | None = None
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        hdr = QLabel("CHANGELOG.md")
+        hdr.setStyleSheet(
+            "color:#e5c07b;font-size:11px;font-weight:bold;"
+            "padding:4px 6px;background:#21252b;border-bottom:1px solid #3e4451;"
+        )
+        root.addWidget(hdr)
+
+        self._browser = QTextBrowser()
+        self._browser.setStyleSheet(
+            "QTextBrowser{background:#1e2127;color:#abb2bf;border:none;font-size:11px;padding:6px;}"
+        )
+        self._browser.setOpenExternalLinks(False)
+        root.addWidget(self._browser, 1)
+
+    def set_project(self, path: Path) -> None:
+        self._project_path = path
+        changelog = path / "CHANGELOG.md"
+        if changelog.exists():
+            try:
+                self._browser.setMarkdown(changelog.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                self._browser.setPlainText("Błąd odczytu CHANGELOG.md")
+        else:
+            self._browser.setPlainText("Brak CHANGELOG.md")
+
+
+# ---------------------------------------------------------------------------
 # NewProjectDialog (bez zmian)
 # ---------------------------------------------------------------------------
 
@@ -1574,6 +1780,15 @@ class ProjectantPanel(QWidget):
         self._sss_panel.project_initialized.connect(self._on_sss_project_initialized)
         self._view_stack.addWidget(self._sss_panel)   # index 3
 
+        self._explorer_section = ExplorerSection()
+        self._view_stack.addWidget(self._explorer_section)   # index 4
+
+        self._readme_section = ReadmeSection()
+        self._view_stack.addWidget(self._readme_section)     # index 5
+
+        self._changelog_section = ChangelogSection()
+        self._view_stack.addWidget(self._changelog_section)  # index 6
+
         splitter.addWidget(self._view_stack)
         splitter.setSizes([220, 980])
         splitter.setCollapsible(0, False)
@@ -1647,13 +1862,39 @@ class ProjectantPanel(QWidget):
     def _set_project(self, path: Path) -> None:
         self._project_path = path
         self._path_label.setText(str(path))
+        # Znajdź projekt w combo; jeśli nie ma — dodaj go
+        found = -1
         for i in range(self._project_combo.count()):
             if self._project_combo.itemData(i) == str(path):
-                self._project_combo.blockSignals(True)
-                self._project_combo.setCurrentIndex(i)
-                self._project_combo.blockSignals(False)
+                found = i
                 break
+        self._project_combo.blockSignals(True)
+        if found == -1:
+            self._project_combo.addItem(path.name, str(path))
+            found = self._project_combo.count() - 1
+        self._project_combo.setCurrentIndex(found)
+        self._project_combo.blockSignals(False)
+        self._explorer_section.set_project(path)
+        self._readme_section.set_project(path)
+        self._changelog_section.set_project(path)
         self._refresh_ui()
+
+    def _show_extra_section(self, key: str) -> None:
+        self._btn_sss.setChecked(False)
+        self._file_list.clearSelection()
+        mapping = {
+            "_btn_explorer": 4,
+            "_btn_readme": 5,
+            "_btn_changelog": 6,
+        }
+        idx = mapping.get(key, 2)
+        if self._project_path is None:
+            self._view_stack.setCurrentIndex(2)
+            return
+        self._view_stack.setCurrentIndex(idx)
+
+    # Specjalne etykiety sekcji w liście (nie są plikami)
+    _EXTRA_SECTIONS = ("Explorer", "README.md", "CHANGELOG.md")
 
     def _refresh_ui(self) -> None:
         self._file_list.clear()
@@ -1667,6 +1908,22 @@ class ProjectantPanel(QWidget):
             return
 
         self._btn_open_editor.setEnabled(False)
+
+        # Sekcje specjalne: Explorer, README.md, CHANGELOG.md
+        for label in self._EXTRA_SECTIONS:
+            item = QListWidgetItem(f"  {label}")
+            item.setForeground(QColor("#61afef"))
+            item.setToolTip(label)
+            item.setData(Qt.ItemDataRole.UserRole, f"__extra__{label}")
+            self._file_list.addItem(item)
+
+        # Separator
+        sep_item = QListWidgetItem("─────────────────")
+        sep_item.setForeground(QColor("#3e4451"))
+        sep_item.setFlags(Qt.ItemFlag.NoItemFlags)
+        self._file_list.addItem(sep_item)
+
+        # Pliki PCC
         for fname in PROJECT_FILES:
             fpath = self._project_path / fname
             item = QListWidgetItem(fname)
@@ -1688,7 +1945,17 @@ class ProjectantPanel(QWidget):
             self._btn_open_editor.setEnabled(False)
             return
 
-        fname = current.text()
+        # Obsługa sekcji specjalnych
+        extra = current.data(Qt.ItemDataRole.UserRole)
+        if extra and str(extra).startswith("__extra__"):
+            label = str(extra).removeprefix("__extra__")
+            self._current_file = None
+            self._btn_open_editor.setEnabled(False)
+            mapping = {"Explorer": 4, "README.md": 5, "CHANGELOG.md": 6}
+            self._view_stack.setCurrentIndex(mapping.get(label, 2))
+            return
+
+        fname = current.text().strip()
         fpath = self._project_path / fname
 
         if not fpath.exists():

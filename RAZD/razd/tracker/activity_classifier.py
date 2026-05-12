@@ -22,7 +22,7 @@ ACTIVITY_COLORS: dict[ActivityType, str] = {
     ActivityType.WORK: "#2563EB",
     ActivityType.CHILL: "#0D9488",
     ActivityType.AWAY: "#475569",
-    ActivityType.OFF: "#1B2A3B",   # ciemny niebieski — widoczny na czarnym tle
+    ActivityType.OFF: "#2D3F52",
 }
 
 ACTIVITY_ALPHA: dict[ActivityType, int] = {
@@ -31,7 +31,7 @@ ACTIVITY_ALPHA: dict[ActivityType, int] = {
     ActivityType.WORK: 195,
     ActivityType.CHILL: 170,
     ActivityType.AWAY: 160,
-    ActivityType.OFF: 200,
+    ActivityType.OFF: 230,
 }
 
 _SOCIAL_DOMAINS = frozenset({

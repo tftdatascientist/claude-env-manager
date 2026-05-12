@@ -30,11 +30,14 @@ from razd import autostart
 from razd.agent.client import RazdAgentThread
 from razd.config.settings import RazdSettings
 from razd.db.repository import RazdRepository
+from razd.notion.projects_fetcher import NotionProjectsFetcher
 from razd.notion.sync_worker import RazdNotionSyncThread
 from razd.tracker.poller import RazdPoller
 from razd.ui.dialogs import ask_user_blocking
 from razd.ui.focus_timer_tab import RazdFocusTimerTab
 from razd.ui.local_tab import RazdLocalTab
+from razd.ui.projects_tab import RazdProjectsTab
+from razd.ui.tasks_tab import RazdTasksTab
 from razd.ui.time_tracking_tab import RazdTimeTrackingTab
 from razd.ui.timeline_tab import RazdTimelineTab
 from razd.ui.www_tab import RazdWwwTab
@@ -49,17 +52,20 @@ def _fmt_uptime(secs: int) -> str:
 
 
 def _make_tray_icon() -> QIcon:
-    """Tworzy ikonkę tray — litera R na niebieskim tle (działa na Windows bez theme)."""
-    px = QPixmap(32, 32)
-    px.fill(QColor("#1565C0"))
-    painter = QPainter(px)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(QColor("white"))
-    font = QFont("Arial", 17, QFont.Weight.Bold)
-    painter.setFont(font)
-    painter.drawText(px.rect(), Qt.AlignmentFlag.AlignCenter, "R")
-    painter.end()
-    return QIcon(px)
+    """Białe R na niebieskim tle — wielowarstwowa ikona dla tray, okna i paska zadań."""
+    icon = QIcon()
+    for size in (16, 32, 48, 64, 128, 256):
+        px = QPixmap(size, size)
+        px.fill(QColor("#1565C0"))
+        painter = QPainter(px)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QColor("white"))
+        font_size = max(8, int(size * 0.60))
+        painter.setFont(QFont("Arial", font_size, QFont.Weight.Bold))
+        painter.drawText(px.rect(), Qt.AlignmentFlag.AlignCenter, "R")
+        painter.end()
+        icon.addPixmap(px)
+    return icon
 
 
 class RazdMainWindow(QMainWindow):
@@ -103,19 +109,40 @@ class RazdMainWindow(QMainWindow):
             else None
         )
 
+        self._projects_fetcher = NotionProjectsFetcher(
+            db_id=n.projects_db_id or None,
+        )
+
+        from razd.notion.tasks_fetcher import NotionTasksFetcher
+        self._tasks_fetcher = NotionTasksFetcher()
+
         tabs = QTabWidget()
         self._tt_tab = RazdTimeTrackingTab(self._repo)
         self._tt_tab.set_poller(self._poller)
-        self._focus_tab = RazdFocusTimerTab(repo=self._repo)
+        self._focus_tab = RazdFocusTimerTab(
+            repo=self._repo,
+            fetcher=self._projects_fetcher,
+        )
         self._focus_tab.focus_session_ended.connect(self._on_focus_session_ended)
         self._timeline_tab = RazdTimelineTab(repo=self._repo)
         self._www_tab = RazdWwwTab(repo=self._repo)
         self._local_tab = RazdLocalTab(repo=self._repo)
+        self._projects_tab = RazdProjectsTab(
+            repo=self._repo,
+            fetcher=self._projects_fetcher,
+        )
+        self._tasks_tab = RazdTasksTab(
+            repo=self._repo,
+            fetcher=self._tasks_fetcher,
+        )
+        self._projects_tab.pinned_changed.connect(self._tasks_tab.refresh_projects)
         tabs.addTab(self._tt_tab, "Time Tracking")
         tabs.addTab(self._focus_tab, "Focus Timer")
         tabs.addTab(self._timeline_tab, "Timeline")
         tabs.addTab(self._www_tab, "WWW")
         tabs.addTab(self._local_tab, "Local")
+        tabs.addTab(self._projects_tab, "Projekty")
+        tabs.addTab(self._tasks_tab, "Zadania")
         # ASUS:inject:begin
         if _ASUS_OK:
             tabs.addTab(_AsusNotesTab(_Path(__file__).resolve().parent.parent.parent), "ASUS")
@@ -341,6 +368,7 @@ class RazdMainWindow(QMainWindow):
 
     def _on_focus_session_ended(self, started_at: str, ended_at: str, duration_s: int, score: int) -> None:
         self._tt_tab.on_focus_session(started_at, ended_at, duration_s, score)
+        self._projects_tab.refresh()
 
     def _on_event(self, dto) -> None:
         self._agent_thread.enqueue_event(dto)

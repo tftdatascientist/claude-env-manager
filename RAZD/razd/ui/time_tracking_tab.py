@@ -52,12 +52,20 @@ _CC_COLOR = "#22aa55"
 _CC_STRIP_H = 7
 
 
-class _TimelineView(QGraphicsView):
-    """Oś czasu: 24h — aktywność, bloki focus (nakładka), bloki CC (pasek dolny)."""
+_SCALE_OPTIONS_TT: list[tuple[str, float]] = [
+    ("3h", 3.0),
+    ("6h", 6.0),
+    ("12h", 12.0),
+    ("24h", 24.0),
+]
 
-    _BAR_H = 32
-    _LABEL_W = 4
-    _LABEL_AREA = 24
+
+class _TimelineView(QGraphicsView):
+    """Oś czasu: skala N godzin wstecz — aktywność, bloki focus, bloki CC."""
+
+    _BAR_H = 128          # 4× oryginał
+    _LABEL_W = 46         # szerokość kolumny etykiet po lewej
+    _LABEL_AREA = 20      # miejsce na etykiety osi X (poniżej paska)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -69,131 +77,176 @@ class _TimelineView(QGraphicsView):
         self.setFrameShape(self.Shape.NoFrame)
         total_h = self._BAR_H + self._LABEL_AREA + 4
         self.setFixedHeight(total_h)
+        self._scale_h: float = 24.0   # ile godzin wstecz pokazujemy
         self._segments: list[tuple[float, float, str]] = []
-        self._focus_blocks: list[tuple[float, float, int]] = []
-        # bloki CC: (start_h, end_h, project_name)
+        self._focus_blocks: list[tuple[float, float, str, int]] = []   # start_h, end_h, proj_name, score
         self._cc_blocks: list[tuple[float, float, str]] = []
+        self._draw()
+
+    def set_scale(self, hours: float) -> None:
+        self._scale_h = hours
         self._draw()
 
     def set_segments(self, segments: list[tuple[float, float, str]]) -> None:
         self._segments = segments
         self._draw()
 
-    def set_focus_blocks(self, blocks: list[tuple[float, float, int]]) -> None:
+    def set_focus_blocks(self, blocks: list[tuple[float, float, str, int]]) -> None:
         self._focus_blocks = blocks
+        self._draw()
+
+    def set_focus_blocks_legacy(self, blocks: list[tuple[float, float, int]]) -> None:
+        """Kompatybilność wsteczna z (start_h, end_h, score)."""
+        self._focus_blocks = [(s, e, "", sc) for s, e, sc in blocks]
         self._draw()
 
     def set_cc_blocks(self, blocks: list[tuple[float, float, str]]) -> None:
         self._cc_blocks = blocks
         self._draw()
 
-    def _hour_w(self) -> float:
-        """Szerokość jednej godziny w px — dopasowana do aktualnej szerokości widoku."""
-        avail = max(self.viewport().width() - self._LABEL_W, 240)
-        return avail / 24
+    # ---- geometria -------------------------------------------------------
+
+    def _avail_w(self) -> float:
+        return max(self.viewport().width() - self._LABEL_W, 240.0)
+
+    def _h_to_x(self, hour_from_daystart: float) -> float:
+        """Zamienia godzinę-od-początku-dnia na X w widoku.
+        Teraz jest po prawej stronie; okno = ostatnie self._scale_h godzin."""
+        now_h = _current_hour_fraction()
+        oldest_h = now_h - self._scale_h
+        frac = (hour_from_daystart - oldest_h) / self._scale_h
+        return self._LABEL_W + frac * self._avail_w()
 
     def _draw(self) -> None:
         self._scene.clear()
-        hw = self._hour_w()
-        W = self._LABEL_W + 24 * hw
+        now_h = _current_hour_fraction()
+        oldest_h = now_h - self._scale_h
+        avail = self._avail_w()
+        W = self._LABEL_W + avail
         H = self._BAR_H + self._LABEL_AREA + 4
         self._scene.setSceneRect(0, 0, W, H)
+        BH = self._BAR_H
 
         # tło paska
         self._scene.addRect(
-            QRectF(self._LABEL_W, 0, 24 * hw, self._BAR_H),
-            QPen(Qt.NoPen),
-            QBrush(QColor("#222222")),
+            QRectF(self._LABEL_W, 0, avail, BH),
+            QPen(Qt.NoPen), QBrush(QColor("#1a1a1a")),
         )
 
-        # segmenty aktywności
+        # --- segmenty aktywności ---
         for start_h, end_h, category in self._segments:
-            x = self._LABEL_W + start_h * hw
-            w = max((end_h - start_h) * hw, 2.0)
+            x0 = self._h_to_x(start_h)
+            x1 = self._h_to_x(end_h)
+            w = max(x1 - x0, 2.0)
+            if x1 < self._LABEL_W or x0 > self._LABEL_W + avail:
+                continue
             color = QColor(_color_for(category))
             color.setAlpha(220)
             self._scene.addRect(
-                QRectF(x, 2, w, self._BAR_H - 4),
-                QPen(Qt.NoPen),
-                QBrush(color),
+                QRectF(max(x0, self._LABEL_W), 2, min(w, avail), BH - 4),
+                QPen(Qt.NoPen), QBrush(color),
             )
 
-        # linie godzin + etykiety — co 3h, lub co 6h gdy ciasno
-        step = 6 if hw < 28 else 3
-        font = QFont("Segoe UI", 8)
-        font.setWeight(QFont.Weight.Normal)
-        label_y = self._BAR_H + 4
-
-        for h in range(25):
-            x = self._LABEL_W + h * hw
-            pen_color = "#555555" if h % 6 else "#777777"
-            self._scene.addLine(x, 0, x, self._BAR_H, QPen(QColor(pen_color), 1))
-
-            if h < 24 and h % step == 0:
-                txt = self._scene.addText(f"{h:02d}:00", font)
-                txt.setDefaultTextColor(QColor("#bbbbbb"))
-                # środkuj etykietę na linii godziny
-                txt_w = txt.boundingRect().width()
-                txt.setPos(x - txt_w / 2, label_y)
-
-        # bloki CC — dolny pasek aktywności CC (nad segmentami, pod focusem)
+        # --- bloki CC (dolny pasek) ---
         for start_h, end_h, project_name in self._cc_blocks:
-            x = self._LABEL_W + start_h * hw
-            w = max((end_h - start_h) * hw, 4.0)
+            x0 = self._h_to_x(start_h)
+            x1 = self._h_to_x(end_h)
+            w = max(x1 - x0, 4.0)
+            if x1 < self._LABEL_W or x0 > self._LABEL_W + avail:
+                continue
             cc_fill = QColor(_CC_COLOR)
             cc_fill.setAlpha(210)
             self._scene.addRect(
-                QRectF(x, self._BAR_H - _CC_STRIP_H, w, _CC_STRIP_H),
-                QPen(Qt.NoPen),
-                QBrush(cc_fill),
+                QRectF(max(x0, self._LABEL_W), BH - _CC_STRIP_H, min(w, avail), _CC_STRIP_H),
+                QPen(Qt.NoPen), QBrush(cc_fill),
             )
             if w >= 36:
                 proj = project_name.replace("\\", "/").rstrip("/").split("/")[-1] or project_name
-                lbl = f"CC: {proj}"
-                font = QFont("Segoe UI", 6)
-                txt = self._scene.addText(lbl, font)
+                txt = self._scene.addText(f"CC: {proj}", QFont("Segoe UI", 6))
                 txt.setDefaultTextColor(QColor("#ccffdd"))
-                txt.setPos(x + 2, self._BAR_H - _CC_STRIP_H - 1)
+                txt.setPos(max(x0, self._LABEL_W) + 2, BH - _CC_STRIP_H - 1)
 
-        # nakładka bloków focus (nad segmentami aktywności)
-        for start_h, end_h, score in self._focus_blocks:
-            x = self._LABEL_W + start_h * hw
-            w = max((end_h - start_h) * hw, 4.0)
+        # --- bloki focus (nakładka z etykietą projektu) ---
+        for start_h, end_h, proj_name, score in self._focus_blocks:
+            x0 = self._h_to_x(start_h)
+            x1 = self._h_to_x(end_h)
+            w = max(x1 - x0, 4.0)
+            if x1 < self._LABEL_W or x0 > self._LABEL_W + avail:
+                continue
             overlay = QColor(_FOCUS_COLOR)
             overlay.setAlpha(70)
             border = QColor(_FOCUS_COLOR)
-            self._scene.addRect(
-                QRectF(x, 0, w, self._BAR_H),
-                QPen(border, 1),
-                QBrush(overlay),
-            )
-            # pasek u góry (4px) pełny kolor
-            self._scene.addRect(
-                QRectF(x, 0, w, 4),
-                QPen(Qt.NoPen),
-                QBrush(border),
-            )
-            # etykieta score jeśli blok wystarczająco szeroki
-            if w >= 32:
-                duration_m = round((end_h - start_h) * 60)
-                label_txt = f"F {duration_m}m · {score}/10"
-                font = QFont("Segoe UI", 7)
-                txt = self._scene.addText(label_txt, font)
-                txt.setDefaultTextColor(QColor("#ffffff"))
-                txt_rect = txt.boundingRect()
-                txt.setPos(x + 2, (self._BAR_H - txt_rect.height()) / 2)
+            rx = max(x0, self._LABEL_W)
+            rw = min(w, self._LABEL_W + avail - rx)
+            self._scene.addRect(QRectF(rx, 0, rw, BH), QPen(border, 1), QBrush(overlay))
+            self._scene.addRect(QRectF(rx, 0, rw, 5), QPen(Qt.NoPen), QBrush(border))
+            if rw >= 28:
+                dur_m = round((end_h - start_h) * 60)
+                lines = []
+                if proj_name:
+                    lines.append(proj_name[:24])
+                lines.append(f"{dur_m}m · {score}/10")
+                font_lbl = QFont("Segoe UI", 7)
+                y_off = 8
+                for line in lines:
+                    txt = self._scene.addText(line, font_lbl)
+                    txt.setDefaultTextColor(QColor("#ffffff"))
+                    txt.setPos(rx + 3, y_off)
+                    y_off += 14
 
-        # linia "teraz"
-        now_h = _current_hour_fraction()
-        if 0 <= now_h <= 24:
-            now_x = self._LABEL_W + now_h * hw
-            self._scene.addLine(
-                now_x, 0, now_x, self._BAR_H,
-                QPen(QColor("#FF5252"), 2),
-            )
+        # --- siatka godzinowa (linie pionowe + etykiety) ---
+        self._draw_grid(now_h, oldest_h, avail, BH)
 
-        # resetuj transform — bez fitInView, widok 1:1
+        # --- linia "Teraz" (prawa krawędź) ---
+        now_x = self._LABEL_W + avail
+        self._scene.addLine(now_x - 1, 0, now_x - 1, BH, QPen(QColor("#FF5252"), 2))
+
         self.resetTransform()
+
+    def _draw_grid(self, now_h: float, oldest_h: float, avail: float, BH: int) -> None:
+        """Rysuje pionowe linie godzinowe i etykiety."""
+        # dobierz krok etykiet do skali
+        if self._scale_h <= 3:
+            label_step = 0.5
+            grid_step = 0.5
+        elif self._scale_h <= 6:
+            label_step = 1.0
+            grid_step = 0.5
+        elif self._scale_h <= 12:
+            label_step = 2.0
+            grid_step = 1.0
+        else:
+            label_step = 3.0
+            grid_step = 1.0
+
+        font = QFont("Segoe UI", 7)
+        label_y = BH + 3
+
+        # zaokrągl najstarszy punkt do grid_step w górę
+        import math
+        cursor_h = math.ceil(oldest_h / grid_step) * grid_step
+
+        while cursor_h <= now_h + grid_step:
+            x = self._h_to_x(cursor_h)
+            if self._LABEL_W <= x <= self._LABEL_W + avail + 1:
+                is_hour = abs(cursor_h - round(cursor_h)) < 0.01
+                is_major = abs(cursor_h % label_step) < 0.01
+                pen_color = "#3a3a3a" if is_hour else "#2a2a2a"
+                self._scene.addLine(x, 0, x, BH, QPen(QColor(pen_color), 1))
+
+                if is_major:
+                    # godzina jako HH:MM
+                    total_min = round(cursor_h * 60)
+                    # zamień na czas doby (może być > 24 gdy przenosimy przez północ)
+                    h = int(total_min // 60) % 24
+                    m = int(total_min % 60)
+                    label = f"{h:02d}:{m:02d}"
+                    txt = self._scene.addText(label, font)
+                    txt.setDefaultTextColor(QColor("#777"))
+                    tw = txt.boundingRect().width()
+                    txt.setPos(x - tw / 2, label_y)
+
+            cursor_h = round(cursor_h + grid_step, 6)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -213,7 +266,7 @@ class RazdTimeTrackingTab(QWidget):
         self._segments: list[tuple[float, float, str]] = []
         self._last_ts: float | None = None
         self._last_category: str | None = None
-        self._focus_blocks: list[tuple[float, float, int]] = []
+        self._focus_blocks: list[tuple[float, float, str, int]] = []
         self._cc_blocks: list[tuple[float, float, str]] = []
         self._active_cc: dict[str, float] = {}
         # referencja do pollera (ustawiana przez main_window)
@@ -285,8 +338,30 @@ class RazdTimeTrackingTab(QWidget):
         break_row.addWidget(self._btn_break)
         root.addLayout(break_row)
 
-        # oś czasu
+        # przyciski skali + oś czasu
+        scale_row = QHBoxLayout()
+        scale_row.setSpacing(3)
+        self._scale_btns: dict[float, QPushButton] = {}
+        for lbl, hours in _SCALE_OPTIONS_TT:
+            btn = QPushButton(lbl)
+            btn.setFixedHeight(20)
+            btn.setFixedWidth(36)
+            btn.setCheckable(True)
+            btn.setStyleSheet(
+                "QPushButton { font-size: 9px; padding: 0 3px;"
+                " border: 1px solid #444; border-radius: 3px;"
+                " background: #2a2a2a; color: #888; }"
+                "QPushButton:checked { background: #1565C0; color: #fff; border-color: #1976D2; }"
+                "QPushButton:hover { border-color: #666; }"
+            )
+            btn.clicked.connect(lambda _=False, h=hours: self._set_scale(h))
+            self._scale_btns[hours] = btn
+            scale_row.addWidget(btn)
+        scale_row.addStretch()
+        root.addLayout(scale_row)
+
         self._timeline = _TimelineView()
+        self._set_scale(24.0)   # domyślna skala
         root.addWidget(self._timeline)
 
         # splitter: status aktywności + lista kategorii
@@ -462,6 +537,11 @@ class RazdTimeTrackingTab(QWidget):
                     f"QProgressBar::chunk {{ background:{chunk_color}; border-radius:3px; }}"
                 )
 
+    def _set_scale(self, hours: float) -> None:
+        self._timeline.set_scale(hours)
+        for h, btn in self._scale_btns.items():
+            btn.setChecked(h == hours)
+
     def _open_report(self) -> None:
         if self._repo is None:
             return
@@ -471,10 +551,11 @@ class RazdTimeTrackingTab(QWidget):
             report = self._repo.get_daily_report(date_str)
         except Exception:
             return
-        dlg = RazdDailyReportDialog(report, self)
+        dlg = RazdDailyReportDialog(report, self, repo=self._repo)
         dlg.exec()
 
-    def on_focus_session(self, started_at: str, ended_at: str, duration_s: int, score: int) -> None:
+    def on_focus_session(self, started_at: str, ended_at: str, duration_s: int, score: int,
+                         proj_name: str = "") -> None:
         """Rejestruje zakończoną sesję focus na osi czasu bieżącego dnia."""
         day_start = self._day_start()
         try:
@@ -485,7 +566,7 @@ class RazdTimeTrackingTab(QWidget):
         start_h = (s_ts - day_start) / 3600
         end_h = (e_ts - day_start) / 3600
         if end_h > 0 and start_h < 24:
-            self._focus_blocks.append((max(0.0, start_h), min(24.0, end_h), score))
+            self._focus_blocks.append((max(0.0, start_h), min(24.0, end_h), proj_name, score))
             self._timeline.set_focus_blocks(self._focus_blocks)
 
     def _resolve_category(self, dto: EventDTO) -> str:
@@ -562,26 +643,49 @@ class RazdTimeTrackingTab(QWidget):
         self._segments = []
         acc: dict[str, float] = defaultdict(float)
         cats = {c.id: c for c in self._repo.list_categories()}
+        day_start = datetime.datetime.fromisoformat(f"{date_str}T00:00:00").timestamp()
+
+        # Scalaj ciągłe bloki tej samej kategorii (eventy co 2s dają segmenty <1px)
+        block_start_ts: float | None = None
+        block_cat: str | None = None
+
+        def _flush(end_ts: float) -> None:
+            if block_start_ts is None or block_cat is None:
+                return
+            start_h = (block_start_ts - day_start) / 3600
+            end_h = (end_ts - day_start) / 3600
+            if start_h < 24 and end_h > 0:
+                self._segments.append((max(0.0, start_h), min(end_h, 24.0), block_cat))
+                acc[block_cat] += end_ts - block_start_ts
 
         for i, ev in enumerate(events):
-            if ev.event_type == "idle" or ev.category_id is None:
+            if ev.event_type == "idle":
+                # przerwa — zamknij bieżący blok
+                _flush(datetime.datetime.fromisoformat(ev.ts).timestamp())
+                block_start_ts = None
+                block_cat = None
                 continue
-            cat_name = cats[ev.category_id].name if ev.category_id in cats else (ev.process_name or "Inne")
-            if i + 1 < len(events):
-                next_ts = datetime.datetime.fromisoformat(events[i + 1].ts).timestamp()
-            else:
-                next_ts = datetime.datetime.fromisoformat(ev.ts).timestamp() + 2
+
+            cat_name = (
+                cats[ev.category_id].name if ev.category_id and ev.category_id in cats
+                else (ev.process_name or "Inne")
+            )
             ev_ts = datetime.datetime.fromisoformat(ev.ts).timestamp()
-            day_start = datetime.datetime.fromisoformat(f"{date_str}T00:00:00").timestamp()
-            start_h = (ev_ts - day_start) / 3600
-            end_h = (next_ts - day_start) / 3600
-            if 0 <= start_h < 24:
-                self._segments.append((start_h, min(end_h, 24.0), cat_name))
-                acc[cat_name] += next_ts - ev_ts
+
+            if block_cat != cat_name:
+                # zmiana kategorii — zamknij poprzedni blok i zacznij nowy
+                _flush(ev_ts)
+                block_start_ts = ev_ts
+                block_cat = cat_name
+
+        # zamknij ostatni blok
+        if events and block_start_ts is not None:
+            last_ts = datetime.datetime.fromisoformat(events[-1].ts).timestamp() + 2
+            _flush(last_ts)
 
         self._session_seconds = acc
 
-        # załaduj historyczne bloki focus
+        # załaduj historyczne bloki focus (z powiązanym projektem)
         self._focus_blocks = []
         day_start_ts = datetime.datetime.fromisoformat(f"{date_str}T00:00:00").timestamp()
         for fs in self._repo.get_focus_sessions_for_day(date_str):
@@ -589,7 +693,17 @@ class RazdTimeTrackingTab(QWidget):
                 try:
                     s_h = (datetime.datetime.fromisoformat(fs.started_at).timestamp() - day_start_ts) / 3600
                     e_h = (datetime.datetime.fromisoformat(fs.ended_at).timestamp() - day_start_ts) / 3600
-                    self._focus_blocks.append((max(0.0, s_h), min(24.0, e_h), fs.score))
+                    # pobierz projekt powiązany z sesją
+                    proj_name = ""
+                    fsp = self._repo.get_session_project(fs.id)
+                    if fsp:
+                        if fsp.custom_project_name:
+                            proj_name = fsp.custom_project_name
+                        elif fsp.notion_project_id:
+                            np_row = self._repo.get_notion_project_by_id(fsp.notion_project_id)
+                            if np_row:
+                                proj_name = np_row.name
+                    self._focus_blocks.append((max(0.0, s_h), min(24.0, e_h), proj_name, fs.score))
                 except ValueError:
                     pass
 

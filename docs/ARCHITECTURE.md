@@ -10,6 +10,89 @@
 | Websites | `WebsiteProjectsPanel` | `src/ui/website_projects_panel.py` |
 | Hidden | `HiddenProjectsPanel` | `src/ui/hidden_projects_panel.py` |
 | Simulator | `SimulatorPanel` | `src/ui/simulator/simulator_panel.py` |
+| Sesje CC | `CCLauncherPanel` | `src/ui/cc_launcher_panel.py` |
+
+## CCLauncherPanel — zakładki slotu (`ProjectSlotWidget`)
+
+Każdy z 4 slotów zawiera wewnętrzny `QTabWidget` z zakładkami:
+
+| Indeks | Nazwa | Zawartość |
+|--------|-------|-----------|
+| 0 | Config | Ścieżka + parametry CC + prompt startowy (splitter poziomy: lewa = config, prawa = statystyki) |
+| 1 | Monitor | `_MonitorView` — lista slotów po lewej, szczegóły po prawej (SSS: bufor, plain: ostatnia wiadomość) |
+| 2 | Historia | Sesje CC, transkrypt |
+| 3 | ZADANIA | Generator zadań do PLAN.md przez CC subprocess (`_build_plan`) |
+| 4 | Prompt Score | `_PromptScorePanel` |
+| 5 | PLAN.md | PCC view (Widok / Edytor) |
+| 6+ | CLAUDE.md, ARCHITECTURE.md, CONVENTIONS.md, Logi, Full Converter | |
+
+### Config — parametry uruchomienia CC
+
+Sekcja "Parametry uruchomienia CC" zawiera:
+- **Ścieżka projektu** — edytowalne pole + przycisk Browse
+- **Model / Effort / Uprawnienia** — combo boxy
+- **Tryb sesji** — radio: Nowa / Wznów (`--resume`) / Kontynuuj (`--continue`)
+- **Opcje** — checkboxy: Verbose (`--verbose`) / Bez aktualizacji (`--no-update-check`)
+- **Przed CC** — komenda PowerShell/bash uruchamiana przed `cc` (np. aktywacja venv)
+- **Flagi CC** — dowolne dodatkowe flagi CLI (np. `--add-dir`, `--output-format`)
+- **Prompt startowy** — tekst wklejany do terminala CC po załadowaniu
+
+Flagi z checkboxów/radio są kompilowane do `SlotConfig.cc_flags` w `get_config()`.
+Pole `cc_flags` trafia do `launch-request.json` jako `"ccFlags"` i jest odczytywane przez cc-panel.
+
+### Monitor — `_MonitorView`
+
+Widok podzielony na lewą (lista slotów) i prawą (szczegóły):
+- **Lista slotów** (lewa, 170px) — przyciski T1–T4 z fazą CC i skrótem SSS meta; kliknięcie przełącza slot
+- **Szczegóły** (prawa) — stack z 3 stronami:
+  - **SSS** (idx 0): meta (runda/sesja/next/done) + bufor wpisów z podziałem na Aktywne / Rozdzielone
+  - **Plain CC** (idx 1): metryki (model/koszt/ctx%) + pole ostatniej wiadomości
+  - **Pusty slot** (idx 2)
+- Odświeżanie: przy każdym `_on_snapshot`, `_on_sss_detected`, zmianie slotu
+
+### ZADANIA — generator zadań przez CC
+
+Układ splitter poziomy:
+- **Lewa** — pole opisu zamierzenia + wybór modelu + przyciski Generuj/Stop/status
+- **Prawa górna** — edytowalna lista zadań `- [ ] ...` + przycisk "Zapisz do PLAN.md"
+- **Prawa dolna** — log CC (surowy output)
+
+Pipeline generowania:
+1. Prompt = system prompt + CLAUDE.md + PLAN.md + ARCHITECTURE.md + opis zamierzenia
+2. Prompt zapisywany do pliku tymczasowego (obejście ograniczenia stdin w QProcess)
+3. CC uruchamiane przez `cmd /c "type prompt.txt | claude -p --output-format stream-json"`
+4. Stream parsowany live — linie `- [ ] ...` wyświetlane na bieżąco
+5. Zapis do PLAN.md: `write_section(text, "next", ...)` (PCC v2) lub append `## Next` (plain)
+
+**Ograniczenie:** `claude -p` wisi gdy uruchamiany jako subprocess aktywnej sesji CC
+(blokada auth socketu). Obejście: plik tymczasowy + izolacja `CC_PANEL_TERMINAL_ID` z env.
+
+### SlotConfig — pola persystowane
+
+| Pole | Typ | Opis |
+|------|-----|------|
+| `project_path` | str | Ścieżka katalogu projektu |
+| `model` | str | Model CC CLI |
+| `effort` | str | Poziom wysiłku |
+| `permission_mode` | str | Klucz trybu uprawnień |
+| `pre_command` | str | Komenda przed CC (terminal) |
+| `cc_flags` | str | Skompilowane flagi CC (tryb sesji + checkboxy + ręczne) |
+| `vibe_prompt` | str | Prompt startowy wklejany po uruchomieniu CC |
+
+### cc-panel — integracja z `launch-request.json`
+
+Pola zapisywane do `~/.claude/cc-panel/launch-request.json`:
+
+| Pole JSON | Źródło w CM | Obsługa w cc-panel |
+|-----------|-------------|-------------------|
+| `slotId` | numer slotu | wybór terminala |
+| `projectPath` | `project_path` | cwd terminala |
+| `terminalCount` | globalna liczba terminali | liczba spawniętych terminali |
+| `model` | `model` | `--model X` w komendzie CC |
+| `permissionFlag` | `permission_mode` | flaga uprawnień |
+| `preCommand` | `pre_command` | `sendText(preCommand)` przed CC (t=300ms) |
+| `ccFlags` | `cc_flags` | dołączane do komendy CC po model/perm |
+| `vibePrompt` | `vibe_prompt` | `sendText(prompt)` po załadowaniu CC (t=+3s) |
 
 ## Struktura katalogów
 

@@ -1,4 +1,4 @@
-"""Panel 'Prompt Score' — podgląd PS.md projektu SSS (prompt, pytania, oceny, porady sędziów)."""
+"""Panel 'Prompt Score' — podgląd PS.md projektu SSS v3 (prompt, pytania, oceny, porady sędziów)."""
 
 from __future__ import annotations
 
@@ -8,9 +8,12 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -26,6 +29,13 @@ _BTN = (
     "QPushButton{background:#2d2d2d;color:#cccccc;border:1px solid #454545;"
     "border-radius:3px;padding:4px 12px}"
     "QPushButton:hover{background:#3c3c3c}"
+    "QPushButton:disabled{color:#5c5c5c;border-color:#383838}"
+)
+
+_BTN_WARN = (
+    "QPushButton{background:#2d2000;color:#e5c07b;border:1px solid #6b5a00;"
+    "border-radius:3px;padding:4px 12px}"
+    "QPushButton:hover{background:#3d2d00}"
     "QPushButton:disabled{color:#5c5c5c;border-color:#383838}"
 )
 
@@ -61,7 +71,6 @@ _JUDGE_LABELS: dict[str, str] = {
 }
 
 _JUDGE_ORDER = ["judge-business", "judge-architect", "judge-pm", "judge-devops", "judge-devil"]
-
 
 # --------------------------------------------------------------------------- #
 # Parsery                                                                       #
@@ -102,26 +111,136 @@ def _parse_judges(section_text: str) -> list[dict[str, str]]:
 
 
 def _parse_round(section_text: str) -> list[dict[str, str]]:
+    """Parser pytań SSS v3: obsługuje zagnieżdżone - A: i - source_judge: oraz - proposals_log:"""
     questions: list[dict[str, str]] = []
     current: dict[str, str] = {}
+    proposals_log: str = ""
+
     for line in section_text.splitlines():
-        line = line.strip()
-        if re.match(r"^- Q\d+:", line):
+        # proposals_log to pole na poziomie sekcji, nie pytania
+        if re.match(r"^- proposals_log:", line):
+            _, _, v = line.partition(":")
+            proposals_log = v.strip()
+            continue
+
+        # Nowe pytanie: "- Q1: tekst" lub zagnieżdżone "  - Q1: tekst"
+        m = re.match(r"^-?\s*- Q(\d+):\s*(.*)", line)
+        if not m:
+            m = re.match(r"^- Q(\d+):\s*(.*)", line)
+        if m:
             if current and "q" in current:
                 questions.append(current)
-            _, _, q = line.partition(":")
-            current = {"q": q.strip()}
-        elif line.startswith("- A:"):
-            current["a"] = line[4:].strip()
-        elif line.startswith("- source_judge:"):
-            current["source"] = line[15:].strip()
+            current = {"q": m.group(2).strip(), "num": m.group(1)}
+            continue
+
+        # Zagnieżdżone pola: "  - A:", "  - source_judge:", "  - A: tekst"
+        stripped = line.strip()
+        if stripped.startswith("- A:"):
+            current["a"] = stripped[4:].strip()
+        elif stripped.startswith("- source_judge:"):
+            current["source"] = stripped[15:].strip()
+
     if current and "q" in current:
         questions.append(current)
+
+    # Dołącz proposals_log jako ostatni element jeśli istnieje
+    if proposals_log and proposals_log not in ("-", "—", ""):
+        for q in questions:
+            q.setdefault("proposals_log", proposals_log)
+
     return questions
 
 
 def _is_empty(value: str) -> bool:
     return not value or value.strip() in ("-", "—", "")
+
+
+# --------------------------------------------------------------------------- #
+# Migrator PS.md v2 → v3                                                       #
+# --------------------------------------------------------------------------- #
+
+def _detect_ps_version(text: str) -> str:
+    """Zwraca 'v3' jeśli plik ma cechy v3, 'v2' jeśli stary format."""
+    if "proposals_log" in text:
+        return "v3"
+    if "Round 1 (statyczna" in text or "Round 2 (panel" in text:
+        return "v3"
+    if "- status:" in text:
+        return "v3"
+    return "v2"
+
+
+_V3_ROUND_TEMPLATE = """\
+### Round {num} {desc}
+- Q1: -
+  - {extra}A: -
+- Q2: -
+  - {extra}A: -
+- Q3: -
+  - {extra}A: -
+{proposals}"""
+
+
+def _migrate_v2_to_v3(text: str) -> str:
+    """
+    Migruje PS.md v2 do formatu v3:
+    - Dodaje pole 'status' do meta jeśli brak
+    - Przepisuje round_1/round_2/round_3 do nowego formatu
+    - Dodaje proposals_log do round_2 i round_3
+    - Zachowuje istniejące dane
+    """
+    result = text
+
+    # 1. Dodaj status do meta jeśli brak
+    meta_section = _read_section(text, "meta")
+    if meta_section and "- status:" not in meta_section:
+        old_meta_block = f"<!-- SECTION:meta -->\n{meta_section}\n<!-- /SECTION:meta -->"
+        new_meta_content = meta_section.rstrip() + "\n- status: -"
+        new_meta_block = f"<!-- SECTION:meta -->\n{new_meta_content}\n<!-- /SECTION:meta -->"
+        result = result.replace(old_meta_block, new_meta_block)
+
+    # 2. Przepisz rundy — dodaj nagłówki sekcji jeśli brak
+    for section_name, desc, has_source, has_proposals in [
+        ("round_1", "(statyczna, główny Claude)", False, False),
+        ("round_2", "(panel sędziów → orchestrator wybiera 3 z 15)", True, True),
+        ("round_3", "(panel sędziów → orchestrator wybiera 3 z 15)", True, True),
+    ]:
+        section_text = _read_section(result, section_name)
+        if not section_text:
+            # Brak sekcji — nie dodajemy, zostawiamy jak jest
+            continue
+
+        round_num = section_name.split("_")[1]
+        has_v3_header = f"Round {round_num}" in section_text
+
+        if not has_v3_header:
+            # Stara sekcja — przepisz do nowego formatu, zachowując dane
+            old_questions = _parse_round(section_text)
+            lines = [f"### Round {round_num} {desc}"]
+            for i, q in enumerate(old_questions, 1):
+                q_text = q.get("q", "-") or "-"
+                lines.append(f"- Q{i}: {q_text}")
+                if has_source:
+                    src = q.get("source", "-") or "-"
+                    lines.append(f"  - source_judge: {src}")
+                a_text = q.get("a", "-") or "-"
+                lines.append(f"  - A: {a_text}")
+            if has_proposals:
+                lines.append("- proposals_log: -")
+
+            new_content = "\n".join(lines)
+            old_block = f"<!-- SECTION:{section_name} -->\n{section_text}\n<!-- /SECTION:{section_name} -->"
+            new_block = f"<!-- SECTION:{section_name} -->\n{new_content}\n<!-- /SECTION:{section_name} -->"
+            result = result.replace(old_block, new_block)
+
+        elif has_proposals and "proposals_log" not in section_text:
+            # Sekcja ma v3 nagłówek ale brak proposals_log — dodaj
+            old_block = f"<!-- SECTION:{section_name} -->\n{section_text}\n<!-- /SECTION:{section_name} -->"
+            new_content = section_text.rstrip() + "\n- proposals_log: -"
+            new_block = f"<!-- SECTION:{section_name} -->\n{new_content}\n<!-- /SECTION:{section_name} -->"
+            result = result.replace(old_block, new_block)
+
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -179,16 +298,72 @@ def _section_label(text: str, color: str = "#9cdcfe") -> QLabel:
 
 
 # --------------------------------------------------------------------------- #
+# Dialog podglądu migracji                                                      #
+# --------------------------------------------------------------------------- #
+
+class _MigratePreviewDialog(QDialog):
+    def __init__(self, original: str, migrated: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Podgląd migracji PS.md v2 → v3")
+        self.setMinimumSize(800, 600)
+        self.setStyleSheet("background:#141414;color:#cccccc;")
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(8)
+
+        info = QLabel(
+            "Poniżej widoczny wynik migracji PS.md do formatu SSS v3. "
+            "Sprawdź zmiany i kliknij <b>Zapisz</b> aby nadpisać plik."
+        )
+        info.setStyleSheet("color:#9cdcfe;font-size:10px;")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        cols = QHBoxLayout()
+
+        for title, content in [("Oryginał (v2)", original), ("Po migracji (v3)", migrated)]:
+            col = QVBoxLayout()
+            lbl = QLabel(title)
+            lbl.setStyleSheet("color:#5c6370;font-size:10px;font-weight:bold;")
+            col.addWidget(lbl)
+            view = QPlainTextEdit()
+            view.setReadOnly(True)
+            view.setFont(_FONT_MONO)
+            view.setPlainText(content)
+            view.setStyleSheet(
+                "QPlainTextEdit{background:#0d1117;color:#cccccc;"
+                "border:1px solid #3c3c3c;border-radius:4px;padding:6px;}"
+            )
+            col.addWidget(view)
+            cols.addLayout(col)
+
+        lay.addLayout(cols, stretch=1)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        btns.setStyleSheet(
+            "QPushButton{background:#2d2d2d;color:#cccccc;border:1px solid #454545;"
+            "border-radius:3px;padding:4px 14px}"
+            "QPushButton:hover{background:#3c3c3c}"
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+
+# --------------------------------------------------------------------------- #
 # Główny panel                                                                  #
 # --------------------------------------------------------------------------- #
 
 class PromptScorePanel(QWidget):
-    """Panel Prompt Score — wyświetla dane z PS.md projektu SSS."""
+    """Panel Prompt Score — wyświetla dane z PS.md projektu SSS v3."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    _DEFAULT_COLOR = "#9d9d9d"
+
+    def __init__(self, parent: QWidget | None = None, slot_color: str = "") -> None:
         super().__init__(parent)
         self._ps_path: Path | None = None
         self._ps_text: str = ""
+        self._slot_color: str = slot_color or self._DEFAULT_COLOR
         self._setup_ui()
 
     # ------------------------------------------------------------------ #
@@ -206,6 +381,22 @@ class PromptScorePanel(QWidget):
         title.setStyleSheet("color:#cccccc;font-size:13px;font-weight:bold;")
         hdr.addWidget(title)
         hdr.addStretch()
+
+        self._lbl_version = QLabel("")
+        self._lbl_version.setStyleSheet(
+            "background:#1a2a1a;color:#98c379;border-radius:3px;"
+            "padding:2px 8px;font-size:10px;font-weight:bold;"
+        )
+        self._lbl_version.setVisible(False)
+        hdr.addWidget(self._lbl_version)
+
+        self._btn_migrate = QPushButton("Dostosuj →v3")
+        self._btn_migrate.setStyleSheet(_BTN_WARN)
+        self._btn_migrate.setToolTip("Dostosuj PS.md do formatu SSS v3")
+        self._btn_migrate.setVisible(False)
+        self._btn_migrate.clicked.connect(self._on_migrate)
+        hdr.addWidget(self._btn_migrate)
+
         self._lbl_badge = QLabel("PS.md")
         self._lbl_badge.setStyleSheet(
             "background:#1a2a3a;color:#61afef;border-radius:3px;"
@@ -235,13 +426,8 @@ class PromptScorePanel(QWidget):
 
         # Zakładki
         self._tabs = QTabWidget()
-        self._tabs.setStyleSheet(
-            "QTabWidget::pane{border:1px solid #3c3c3c;background:#141414;}"
-            "QTabBar::tab{background:#252526;color:#9d9d9d;padding:6px 16px;"
-            "border:1px solid #3c3c3c;border-bottom:none;margin-right:2px;}"
-            "QTabBar::tab:selected{background:#141414;color:#cccccc;}"
-            "QTabBar::tab:hover{background:#2a2a2a;color:#cccccc;}"
-        )
+        self._tabs.setDocumentMode(True)
+        self._apply_tab_style()
 
         self._tabs.addTab(self._build_prompt_tab(), "Prompt")
         self._tabs.addTab(self._build_pytania_tab(), "Pytania")
@@ -249,6 +435,22 @@ class PromptScorePanel(QWidget):
         self._tabs.addTab(self._build_porady_tab(), "Porady sędziów")
 
         root.addWidget(self._tabs, stretch=1)
+
+    def _apply_tab_style(self) -> None:
+        c = self._slot_color
+        self._tabs.setStyleSheet(
+            "QTabWidget::pane{border:none;background:#141414;}"
+            f"QTabBar::tab{{background:#1a1a1a;color:#5c6370;"
+            f"font-size:10px;padding:5px 14px;border:none;margin-right:2px;}}"
+            f"QTabBar::tab:selected{{background:#1e1e1e;color:{c};"
+            f"border-bottom:2px solid {c};}}"
+            "QTabBar::tab:hover:!selected{background:#222222;color:#9d9d9d;}"
+        )
+
+    def set_slot_color(self, color: str) -> None:
+        """Aktualizuje kolor akcentu zakładek zgodnie z kolorem slotu."""
+        self._slot_color = color or self._DEFAULT_COLOR
+        self._apply_tab_style()
 
     # -- Budowanie zakładek ------------------------------------------------
 
@@ -329,6 +531,8 @@ class PromptScorePanel(QWidget):
             self._lbl_path.setText(f"Brak PS.md w {project_path}")
             self._lbl_path.setStyleSheet(_LBL_DIM)
             self._lbl_badge.setVisible(False)
+            self._lbl_version.setVisible(False)
+            self._btn_migrate.setVisible(False)
             self._btn_reload.setEnabled(False)
             self._clear_all()
             return
@@ -346,6 +550,17 @@ class PromptScorePanel(QWidget):
         self._lbl_path.setStyleSheet(_LBL_VAL)
         self._lbl_badge.setVisible(True)
         self._btn_reload.setEnabled(True)
+
+        version = _detect_ps_version(text)
+        self._lbl_version.setText(version)
+        self._lbl_version.setStyleSheet(
+            f"background:{'#1a2a1a' if version == 'v3' else '#2a1a00'};"
+            f"color:{'#98c379' if version == 'v3' else '#e5c07b'};"
+            "border-radius:3px;padding:2px 8px;font-size:10px;font-weight:bold;"
+        )
+        self._lbl_version.setVisible(True)
+        self._btn_migrate.setVisible(version != "v3")
+
         self._render()
 
     # ------------------------------------------------------------------ #
@@ -359,6 +574,9 @@ class PromptScorePanel(QWidget):
             self._ps_text = self._ps_path.read_text(encoding="utf-8")
         except OSError:
             return
+        version = _detect_ps_version(self._ps_text)
+        self._lbl_version.setText(version)
+        self._btn_migrate.setVisible(version != "v3")
         self._render()
 
     def _clear_all(self) -> None:
@@ -378,6 +596,33 @@ class PromptScorePanel(QWidget):
         self._render_oceny_tab(text)
         self._render_porady_tab(text)
 
+    def _on_migrate(self) -> None:
+        if not self._ps_path or not self._ps_text:
+            return
+        migrated = _migrate_v2_to_v3(self._ps_text)
+        if migrated == self._ps_text:
+            QMessageBox.information(
+                self, "Brak zmian",
+                "Plik PS.md nie wymaga migracji lub nie można automatycznie\n"
+                "wykryć różnic między wersjami."
+            )
+            return
+        dlg = _MigratePreviewDialog(self._ps_text, migrated, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            try:
+                self._ps_path.write_text(migrated, encoding="utf-8")
+                self._ps_text = migrated
+                self._lbl_version.setText("v3")
+                self._lbl_version.setStyleSheet(
+                    "background:#1a2a1a;color:#98c379;border-radius:3px;"
+                    "padding:2px 8px;font-size:10px;font-weight:bold;"
+                )
+                self._btn_migrate.setVisible(False)
+                self._render()
+                QMessageBox.information(self, "Gotowe", "PS.md zaktualizowany do formatu SSS v3.")
+            except OSError as e:
+                QMessageBox.critical(self, "Błąd", f"Nie udało się zapisać pliku:\n{e}")
+
     # -- Render: Prompt -------------------------------------------------------
 
     def _render_prompt_tab(self, text: str) -> None:
@@ -394,9 +639,18 @@ class PromptScorePanel(QWidget):
         if _is_empty(status):
             self._lbl_ps_status.setText("—")
             self._lbl_ps_status.setStyleSheet(_LBL_DIM)
+        elif status == "scored":
+            self._lbl_ps_status.setText("● scored")
+            self._lbl_ps_status.setStyleSheet(_LBL_OK)
         elif status == "complete":
             self._lbl_ps_status.setText("● kompletny")
             self._lbl_ps_status.setStyleSheet(_LBL_OK)
+        elif status == "skipped_too_short":
+            self._lbl_ps_status.setText("⚠ za krótki prompt")
+            self._lbl_ps_status.setStyleSheet(_LBL_WARN)
+        elif status == "intake_incomplete":
+            self._lbl_ps_status.setText("◌ intake w toku")
+            self._lbl_ps_status.setStyleSheet(_LBL_WARN)
         else:
             self._lbl_ps_status.setText(f"◌ {status}")
             self._lbl_ps_status.setStyleSheet(_LBL_WARN)
@@ -432,6 +686,11 @@ class PromptScorePanel(QWidget):
             else:
                 for idx, qa in enumerate(questions, 1):
                     _insert(lay, self._make_qa_card(idx, qa, color, has_source))
+
+                # proposals_log jeśli dostępny
+                proposals = questions[0].get("proposals_log", "") if questions else ""
+                if not _is_empty(proposals):
+                    _insert(lay, self._make_proposals_log_card(proposals, color))
 
             if i < len(rounds) - 1:
                 _insert(lay, _sep())
@@ -488,6 +747,27 @@ class PromptScorePanel(QWidget):
             a_row.addWidget(a_lbl, stretch=1)
             lay.addLayout(a_row)
 
+        return card
+
+    def _make_proposals_log_card(self, proposals: str, color: str) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame{{background:#1a1a1a;border-left:2px solid {color}44;"
+            "border-top:none;border-right:none;border-bottom:none;"
+            "border-radius:0px;}}"
+        )
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(10, 4, 8, 4)
+        lay.setSpacing(2)
+
+        hdr = QLabel("proposals_log")
+        hdr.setStyleSheet(f"color:{color}66;font-size:9px;background:transparent;")
+        lay.addWidget(hdr)
+
+        lbl = QLabel(proposals)
+        lbl.setStyleSheet("color:#787878;font-size:9px;background:transparent;")
+        lbl.setWordWrap(True)
+        lay.addWidget(lbl)
         return card
 
     # -- Render: Oceny --------------------------------------------------------

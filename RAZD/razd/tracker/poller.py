@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -167,7 +167,7 @@ class RazdPoller(QObject):
                 event_type = "browser"
 
         dto = EventDTO(
-            ts=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ts=datetime.now().isoformat(timespec="seconds"),
             event_type=event_type,
             process_name=process_name,
             window_title=window_title,
@@ -175,14 +175,30 @@ class RazdPoller(QObject):
             idle_seconds=round(idle, 1),
         )
         self.event_ready.emit(dto)
-        if self._repo and dto.event_type != "idle":
+        if self._repo:
             now_iso = datetime.now().isoformat(timespec="seconds")
-            new_url = dto.url != self._prev_url
-            new_proc = dto.process_name != self._prev_process
+            cat_id: int | None = None
             if dto.url:
-                self._repo.record_web_visit(dto.url, dto.window_title, dto.process_name, now_iso, new_url)
-            if dto.process_name:
-                self._repo.record_app_usage(dto.process_name, now_iso, new_proc)
+                cat_id = self._repo.get_category_for_url(dto.url)
+            if cat_id is None and dto.process_name:
+                cat_id = self._repo.get_category_for_process(dto.process_name)
+            self._repo.insert_event(
+                ts=dto.ts,
+                event_type=dto.event_type,
+                raw_json=dto.to_json(),
+                process_name=dto.process_name,
+                window_title=dto.window_title,
+                url=dto.url,
+                idle_seconds=int(dto.idle_seconds),
+                category_id=cat_id,
+            )
+            if dto.event_type != "idle":
+                new_url = dto.url != self._prev_url
+                new_proc = dto.process_name != self._prev_process
+                if dto.url:
+                    self._repo.record_web_visit(dto.url, dto.window_title, dto.process_name, now_iso, new_url)
+                if dto.process_name:
+                    self._repo.record_app_usage(dto.process_name, now_iso, new_proc)
         self._prev_url = dto.url
         self._prev_process = dto.process_name if dto.event_type != "idle" else self._prev_process
         self._break_engine.feed(dto)
