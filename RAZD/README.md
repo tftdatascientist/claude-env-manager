@@ -1,165 +1,104 @@
 # RAZD — Time Tracking & Focus
 
-Moduł CEM do automatycznego trackingu czasu pracy i fokusu, sterowany agentem Claude Code.
-Działa w tle na Windows, kategoryzuje aktywność przez AI i uczy się zachowań użytkownika przez dialog.
+Desktopowa aplikacja Windows 11 do śledzenia aktywności, zarządzania czasem i sesji głębokiego skupienia. Integruje się z Notion (projekty i zadania) oraz Claude Code (CC sessions).
 
 ## Uruchomienie
 
-```bash
+```
 .venv/Scripts/python.exe main.py               # normalny start
-.venv/Scripts/python.exe main.py --minimized   # start w tle (autostart)
-.venv/Scripts/python.exe -m pytest tests/ -v   # testy (133 pass)
+.venv/Scripts/python.exe main.py --minimized   # start w tle (autostart z Windows)
+.venv/Scripts/python.exe -m pytest tests/ -v   # testy
 ```
 
 ## Stack
 
-| Warstwa | Technologia |
-|---------|-------------|
-| UI | Python 3.13 · PySide6 (Qt6) |
-| Tracker | psutil · pywin32 · uiautomation |
-| Agent | claude-agent-sdk (Claude Code) |
-| Baza danych | SQLite (lokalnie) |
-| Eksport | notion-client 3.x |
+| Warstwa       | Technologia                              |
+|---------------|------------------------------------------|
+| UI            | Python 3.13 · PySide6 (Qt6)             |
+| Baza danych   | SQLite (via `razd/db/repository.py`)     |
+| Integracja AI | claude-agent-sdk (CC sessions)           |
+| Notion        | notion-client 3.x (`data_sources` API)  |
+| Tracker       | psutil + polling co 3s                  |
+| Testy         | pytest + pytest-qt                      |
 
 ## Architektura
 
 ```
-[Tracker poll 2s] ──► [EventDTO JSON] ──► [Claude Code Agent (QThread)]
-                                                    │
-                                         [SQLite — events / categories /
-                                          url_mappings / user_decisions /
-                                          focus_sessions / cc_sessions /
-                                          break_events / distraction_events]
-                                                    │
-                              ┌─────────────────────┴──────────────────────┐
-                              ▼                                             ▼
-                   [TimeTrackingTab — oś czasu]              [FocusTimerTab — timer]
+razd/
+  tracker/         # poller aktywności + klasyfikator AI
+  agent/           # klient CC (claude-agent-sdk)
+  db/              # SQLite schema + repository
+  notion/          # projects_fetcher, tasks_fetcher, sync_worker
+  ui/              # wszystkie zakładki Qt
+  config/          # ustawienia (TOML + dataclasses)
+  autostart.py     # rejestr Windows (autostart)
+  shortcut.py      # skrót na pulpicie (.lnk)
+main.py            # entry point
 ```
 
 ## Funkcje
 
 ### Śledzenie aktywności (Tracker)
-- Polling co 2s: aktywne okno, tytuł, nazwa procesu
-- Detekcja idle przez `GetLastInputInfo` (próg 60s)
-- Ekstrakcja URL z Chrome / Edge przez UI Automation
-- Filtr prywatności: tokeny i hasła z query string są usuwane przed zapisem
+Poller co 3s rejestruje aktywną aplikację i okno. Zapisuje eventy do SQLite. Wykrywa sesje CC (Claude Code) i mierzy ich czas.
 
 ### AI Kategoryzacja (Agent)
-- Persistent sesja Claude Code Agent przez `claude-agent-sdk`
-- Tools: `save_category`, `ask_user`, `query_knowledge`
-- Gdy agent napotka nieznany proces/URL → dialog Qt z pytaniem do użytkownika
-- Odpowiedź trafia do SQLite i jest używana w kolejnych sesjach
+Wątek `RazdAgentThread` klasyfikuje procesy przez claude-agent-sdk. Przypisuje kategorie (praca/rozrywka/inne) i liczy czas na kategorie.
 
 ### Time Tracking Tab
-- Oś czasu dnia z blokami aktywności per kategoria (kolory)
-- Fioletowe bloki sesji Focus, zielone bloki sesji Claude Code
-- Panel statystyk: czas aktywny / produktywny / idle
-- Historia dni przez `QCalendarWidget`
-- Wskaźnik rozproszenia (przełączenia/min) w czasie rzeczywistym
-- Eksport CSV
+Oś czasu dzisiejszej aktywności. Grupy aplikacji (CC sessions, focus sessions, rozrywka). Liczniki uptime App / PC w toolbarze.
 
 ### Focus Timer Tab
-- Whitelist aplikacji (dodaj / usuń)
-- Czas sesji: 30 / 60 / 90 / 120 min (preset lub własny)
-- Stany: start → running → paused → ended
-- Gdy aktywna aplikacja nie jest na whiteliście → tray ping + dialog ostrzegawczy
-- Po zakończeniu: wynik skupienia 1–10 (% czasu spędzonego w aplikacjach z whitelisty)
-- Wynik i czas sesji zapisywane do SQLite
+Okrągła tarcza timera (30–120 min, domyślnie 60 min). Whitelist aplikacji — alert gdy wyjdziesz poza focus. Wynik sesji 1–10 na podstawie whitelist compliance. Dźwięk po zakończeniu. Sync czasu do Notion.
 
 ### Break Engine
-- Śledzi ciągły czas pracy bez przerwy
-- Domyślny interwał: 50 min (konfigurowalny w `defaults.toml`)
-- Po przekroczeniu interwału: powiadomienie tray + sygnał do UI
-- Reset przy idle > 5 min lub ręcznym potwierdzeniu przerwy
+Alert po skonfigurowanym czasie ciągłej pracy (domyślnie 45 min).
 
 ### Distraction Detector
-- Sliding window 60s: zlicza przełączenia między aplikacjami
-- Alert tray gdy > 6 przełączeń/min przez 3 kolejne pomiary
-- Score (przełączenia/min) aktualizowany w TimeTrackingTab na żywo
+Wykrywa szybkie przełączanie aplikacji (>N przełączeń/min) i wysyła alert do tray.
 
-### CC Monitoring
-- Automatyczne wykrywanie procesów `cc.exe`, `claude.exe` i Node.js z `@anthropic` w cmdline
-- Sesje Claude Code zapisywane do `cc_sessions` / `cc_snapshots` w SQLite
-- Zielone bloki sesji CC na osi czasu
-- Panel aktywnych sesji CC w bieżącym dniu
+### Projekty
+Pobiera projekty z bazy Notion. 4 sloty pinnowanych projektów z kolorowymi kartami i statystykami czasu.
 
-### Raport Dnia
-- Dialog `RazdDailyReportDialog` z pełną analityką:
-  - Wynik produktywności 0–100 (kolor zielony/żółty/czerwony)
-  - Czas aktywny / produktywny / idle
-  - Top kategorie z paskami procentowymi
-  - Lista sesji Focus z wynikami
-  - Lista sesji Claude Code z projektami
-  - Compliance przerw (zasugerowane vs wzięte)
-  - Liczba alertów rozproszenia i średnie przełączenia/min
+### Zadania (Kanban)
+Kanban board 3 kolumny (Do zrobienia / W trakcie / Gotowe) dla każdego pinnowanego projektu. Filtry statusów. Tworzenie i edycja zadań (tytuł, deadline, szczegóły) z synchronizacją do Notion.
 
 ### Eksport do Notion
-- `RazdNotionExporter` — dzienne podsumowanie czasu per aplikacja do bazy Notion
-- `RazdNotionSyncThread` — automatyczna synchronizacja co N minut (konfigurowalny interwał)
-- Opcjonalny eksport URLi (włączany w konfiguracji)
-- Token i DB ID przez zmienne środowiskowe: `RAZD_NOTION_TOKEN`, `RAZD_NOTION_DB_ID`
+Sync danych dziennych do wybranych baz Notion co N minut.
 
 ### Autostart Windows
-- Rejestracja w `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-- Włącz/wyłącz z menu tray → "Autostart z Windows"
-- Tryb `--minimized`: start bez okna, tracker i agent w tle od razu
+Wpis w rejestrze `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Konfigurowalny z menu tray.
 
 ### Tray & Background
-- Ikona systemowa (litera R, niebieski kwadrat) zawsze w zasobniku
-- Zamknięcie okna (X) = przejście w tło, nie zamknięcie aplikacji
-- Toolbar: "Przejdź w tło" ukrywa okno bez zatrzymywania serwisów
-- Podwójne kliknięcie na ikonę tray = przywróć okno
+Ikona R (niebieski kwadrat) zawsze w zasobniku. X na oknie = przejście w tło, nie zamknięcie. Menu tray: pokaż, autostart, skrót na pulpicie, zakończ.
 
 ## Konfiguracja
 
-Plik `razd/config/defaults.toml` — nadpisywany przez `~/.razd/settings.toml`:
+Plik `.env` w katalogu projektu:
 
-```toml
-[tracking]
-poll_interval_s = 2
-idle_threshold_s = 60
-
-[break]
-work_interval_min = 50
-
-[distraction]
-threshold_spm = 6.0
-
-[notion]
-enabled = false
-sync_interval_mins = 30
-export_urls = false
 ```
+RAZD_NOTION_TOKEN=secret_...
+RAZD_NOTION_PROJECTS_DB_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+RAZD_NOTION_TASKS_DB_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Pozostałe ustawienia: `razd/config/defaults.toml`.
 
 ## Baza danych
 
-SQLite w `~/.razd/razd.db`. Główne tabele:
+SQLite w `~/.razd/razd.db`. Schemat: `razd/db/schema.sql`.
 
-| Tabela | Zawartość |
-|--------|-----------|
-| `events` | surowe eventy trackera |
-| `processes` | znane procesy z kategorią |
-| `categories` | słownik kategorii |
-| `url_mappings` | mapowania URL → kategoria |
-| `user_decisions` | odpowiedzi użytkownika na pytania agenta |
-| `focus_sessions` | sesje Focus Timera z wynikiem |
-| `focus_process_samples` | próbki procesu w trakcie sesji focus |
-| `cc_sessions` | sesje Claude Code |
-| `cc_snapshots` | snapshoty procesów CC |
-| `break_events` | zasugerowane i wzięte przerwy |
-| `distraction_events` | alerty rozproszenia |
+Główne tabele: `activity_events`, `focus_sessions`, `focus_process_samples`, `notion_projects`, `notion_tasks`, `pinned_projects`.
 
 ## Testy
 
-133 testów pytest (pytest-qt). Pokrycie: tracker, db, agent, UI smoke, focus timer, CC scanner, break engine, distraction detector, daily report, Notion exporter.
-
-```bash
+```
 .venv/Scripts/python.exe -m pytest tests/ -v
 ```
 
+Pokrycie: tracker, db, agent, UI smoke, focus timer, CC scanner, break engine, distraction detector, daily report, Notion exporter.
+
 ## Ograniczenia MVP
 
-- Windows 10/11 only (pywin32, uiautomation)
-- URL extraction tylko Chrome / Edge (Firefox UI Automation niestabilne)
-- Wymaga aktywnej subskrypcji Claude Code lub klucza API
-- Privacy: URLs zapisywane bez tokenów/haseł (regex sanitize)
+- Brak obsługi wielu użytkowników
+- Tracker działa tylko na Windows (psutil + win32)
+- Notion API: tylko bazy `data_sources` (notion-client 3.x)

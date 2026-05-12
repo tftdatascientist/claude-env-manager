@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QToolTip, QVBoxLayout, QWidget
 
 from razd.tracker.activity_classifier import (
@@ -37,6 +37,8 @@ class _TimelineCanvas(QWidget):
     Na skali 72h — wyraźne separatory dób.
     Hover → tooltip z dokładną godziną.
     """
+
+    scale_step_requested = Signal(int)  # +1 lub -1 (scroll wheel)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -221,6 +223,14 @@ class _TimelineCanvas(QWidget):
         QToolTip.hideText()
         super().leaveEvent(event)
 
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self.scale_step_requested.emit(-1)  # przybliżenie = mniejszy zakres
+        elif delta < 0:
+            self.scale_step_requested.emit(1)   # oddalenie = większy zakres
+        event.accept()
+
 
 class RazdVerticalTimeline(QWidget):
     """Pionowa oś czasu z wyborem skali (3h/6h/12h/24h/72h)."""
@@ -276,11 +286,24 @@ class RazdVerticalTimeline(QWidget):
 
         root.addWidget(self._canvas, 1)
 
+        self._canvas.scale_step_requested.connect(self._on_wheel_step)
         self._apply_scale(6)
 
     def _on_scale(self, hours: int) -> None:
         self._apply_scale(hours)
         self.scale_changed.emit(hours)
+
+    def _on_wheel_step(self, direction: int) -> None:
+        """direction: -1 = przybliż (mniejszy zakres), +1 = oddal (większy zakres)."""
+        scales = [h for _, h in _SCALE_OPTIONS]
+        try:
+            idx = scales.index(self._current_scale)
+        except ValueError:
+            idx = 1  # fallback do 6h
+        new_idx = max(0, min(len(scales) - 1, idx + direction))
+        if new_idx != idx:
+            self._apply_scale(scales[new_idx])
+            self.scale_changed.emit(scales[new_idx])
 
     def _apply_scale(self, hours: int) -> None:
         self._current_scale = hours

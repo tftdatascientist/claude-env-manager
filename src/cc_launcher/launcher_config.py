@@ -48,6 +48,7 @@ class SlotConfig:
     effort: str = "high"
     permission_mode: str = "bypass (--dangerously-skip-permissions)"
     pre_command: str = ""
+    cc_flags: str = ""
     vibe_prompt: str = DEFAULT_VIBE_PROMPT
 
 
@@ -90,6 +91,7 @@ def load_launcher_config() -> LauncherConfig:
                         "bypass (--dangerously-skip-permissions)",
                     ),
                     pre_command=slot_raw.get("pre_command", ""),
+                    cc_flags=slot_raw.get("cc_flags", ""),
                     vibe_prompt=slot_raw.get("vibe_prompt", DEFAULT_VIBE_PROMPT),
                 ))
                 if "terminal_count" in slot_raw:

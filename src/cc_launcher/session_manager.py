@@ -50,12 +50,17 @@ def _write_launch_request(
     model: str = "",
     permission_flag: str = "",
     pre_command: str = "",
+    cc_flags: str = "",
 ) -> None:
+    # --no-flicker jest znacznikiem UI (CLAUDE_CODE_NO_FLICKER=1 ustawia cc-panel w env),
+    # nie flagą CC CLI — usuwamy go przed przekazaniem do terminala.
+    clean_flags = " ".join(t for t in cc_flags.split() if t != "--no-flicker")
     payload = {
         "slotId": slot_id,
         "projectPath": project_path,
         "terminalCount": max(1, min(4, terminal_count)),
         "preCommand": pre_command,
+        "ccFlags": clean_flags,
         "vibePrompt": vibe_prompt,
         "model": model,
         "permissionFlag": permission_flag,
@@ -79,6 +84,7 @@ def prepare_and_launch(
     model: str = "",
     permission_flag: str = "",
     pre_command: str = "",
+    cc_flags: str = "",
 ) -> bool:
     """Zapisuje konfigurację slotu i uruchamia VS Code z cc-panel.
 
@@ -90,8 +96,8 @@ def prepare_and_launch(
     if not project_path or not Path(project_path).is_dir():
         return False
     _update_ustawienia_path(slot_id, project_path)
-    _write_launch_request(slot_id, project_path, terminal_count, vibe_prompt, model, permission_flag, pre_command)
-    return _run_code(project_path, "--command", "ccPanel.launchSlot")
+    _write_launch_request(slot_id, project_path, terminal_count, vibe_prompt, model, permission_flag, pre_command, cc_flags)
+    return _run_code("--new-window", project_path, "--command", "ccPanel.launchSlot")
 
 
 def open_vscode_window(project_path: str) -> bool:

@@ -1,57 +1,27 @@
-<!-- PLAN v2.0 -->
-
 ## Meta
-<!-- SECTION:meta -->
-- status: notion-complete
-- goal: MVP RAZD: moduł CEM z dwiema zakładkami — Time Tracking (auto-detekcja procesów/URLs/idle + AI kategoryzacja przez Claude Code z dialogiem nauki) i Focus Timer (whitelist appek 30-120min + ping gdy odlatujesz) + eksport do Notion
-- session: 3
-- updated: 2026-05-02 00:52
-<!-- /SECTION:meta -->
-
 ## Current
-<!-- SECTION:current -->
-- task: brak — F1+F2+F3 ukończone, 133/133 testów zielonych
-<!-- /SECTION:current -->
+## Next
+## Done
+## Buffer
+## Blockers
+## Session Log
 
 ## Next
-<!-- SECTION:next -->
-- [x] F1-DB + F1-Engine + F1-UI + F1-Tests: RazdBreakEngine, break_events DB, BreakBar UI, tray, 11 testów
-- [x] F2-DB + F2-Detector + F2-UI + F2-Tests: RazdDistractionDetector, distraction_events DB, score panel, 10 testów
-- [x] F3-Repo + F3-Dialog + F3-Tests: get_daily_report, RazdDailyReportDialog, 12 testów
-<!-- /SECTION:next -->
 
 ## Done
-<!-- SECTION:done -->
-- Bootstrap projektu: szkielet razd/, integracja z top menu CEM, RazdMainWindow z dwiema zakładkami
-- Tracker: active_window, idle, browser_url, poller (EventDTO co 2s)
-- Agent: RazdAgentThread, tools (save_category, ask_user, query_knowledge), prompts
-- DB: schema SQLite, RazdRepository (events, processes, categories, url_mappings, user_decisions)
-- UI: TimeTrackingTab (oś czasu, kategorie, historia DB), FocusTimerTab (whitelist, countdown, tray ping)
-- Config: defaults.toml + RazdSettings (load/save/merge)
-- Notion integration: RazdNotionExporter, NotionActivityRecord, RazdNotionSyncThread
-- Testy: 67/67 pass (tracker, db, agent, dialogs, focus timer, time tracking, settings, notion, UI smoke)
-- Focus scoring: focus_sessions + focus_process_samples w SQLite, scoring 1-10, blok focus na osi czasu, dialog podsumowania; 82/82 testów
-- CC monitoring: cc_scanner (psutil, cc/claude/node+@anthropic), cc_sessions + cc_snapshots w SQLite, _CcSessionTracker w pollerze, bloki CC na osi czasu, panel aktywnych sesji; 100/100 testów (18 nowych)
-<!-- /SECTION:done -->
-
-## Buffer
-<!-- SECTION:buffer -->
-<!-- /SECTION:buffer -->
-
-## Blockers
-<!-- SECTION:blockers -->
-<!-- /SECTION:blockers -->
-
-## Session Log
-<!-- SECTION:session_log -->
-- 2026-05-02 17:56 | HANDOFF: sesja zamknięta, ostatnie current='brak — F1+F2+F3 ukończone, 133/133 testów zielonych'
-- 2026-05-02 17:30 | HANDOFF: sesja zamknięta, ostatnie current='brak — F1+F2+F3 ukończone, 133/133 testów zielonych'
-- 2026-05-02 16:53 | HANDOFF: sesja zamknięta, ostatnie current='brak — F1+F2+F3 ukończone, 133/133 testów zielonych'
-- 2026-05-02 16:27 | HANDOFF: sesja zamknięta, ostatnie current='brak — F1+F2+F3 ukończone, 133/133 testów zielonych'
-- 2026-05-02 12:35 | HANDOFF: sesja zamknięta, ostatnie current='brak — F1+F2+F3 ukończone, 133/133 testów zielonych'
-- 2026-05-02 11:46 | HANDOFF: sesja zamknięta, ostatnie current='brak — F1+F2+F3 ukończone, 133/133 testów zielonych'
-- 2026-05-02 11:41 | HANDOFF: sesja zamknięta, ostatnie current='brak — F1+F2+F3 ukończone, 133/133 testów zielonych'
-- 2026-05-02 01:45 | HANDOFF: sesja zamknięta, ostatnie current='brak — F1+F2+F3 ukończone, 133/133 testów zielonych'
-- 2026-05-02 01:20 | HANDOFF: sesja zamknięta, ostatnie current='brak — CC monitoring ukończony, 100/100 testów zielonych'
-- 2026-05-02 01:17 | HANDOFF: sesja zamknięta, ostatnie current='brak — CC monitoring ukończony, 100/100 testów zielonych'
-<!-- /SECTION:session_log -->
+- [x] BUGFIX: poller nigdy nie zapisywał do tabeli `events` — insert_event dodany do `_poll()`, teraz Timeline i raporty mają dane
+- [x] BUGFIX: _load_day_from_db tworzył 1 segment per event (2s → 0.056px niewidoczne) — scalanie bloków tej samej kategorii
+- [x] BUGFIX: kolor OFF (#1B2A3B) niewidoczny na tle #111 — zmieniony na #2D3F52 alpha 230
+- [x] BUGFIX: poller używał UTC timezone → ts z +00:00, zapytania LIKE gubił wieczorne wpisy — zmieniony na datetime.now()
+- [x] Ikona aplikacji wielowarstwowa (16/32/48/64/128/256px) — `_make_tray_icon` w `main_window.py`, lepsza jakość na pasku zadań i tray
+- [x] `generate_icon()` w `shortcut.py` — skrót na pulpicie z ikoną 256px (Pillow multi-ICO lub Qt fallback)
+- [x] `RazdMonthlyStatsWidget` dodany do sidebara zakładki Timeline (w `QScrollArea` pod weekly)
+- [x] Statystyki tygodnia i miesiąca dodane do `RazdDailyReportDialog` (gdy przekazano `repo=`)
+- [x] Dodać kontrolkę suwaka/przycisków zoom (+/-) do widoku osi czasu — przyciski 3h/6h/12h/24h/72h w `timeline_widget.py`
+- [x] Zaimplementować obsługę zdarzenia `wheelEvent` na widoku osi czasu — scroll w górę przybliża, w dół oddala skalę
+- [x] Przerysowywać oś czasu i bloki aktywności przy każdej zmianie skali (sygnał scale_changed → repaint)
+- [x] Zbadać i naprawić logikę liczenia czasu w raporcie dnia — nakładające się eventy dawały duration ≤ 0 → pominięcie; poprawka: `max(2, min(..., 120))`
+- [x] Zdefiniować i zaimplementować `DayStats` dataclass + `compute_day_stats(date) -> DayStats` w `RazdRepository`
+- [x] Dodać widżet statystyk tygodniowych `RazdWeeklyStatsWidget` — ostatnie 7 dni, paski PC ON/Praca/Idle w sidebarze Timeline
+- [x] Dodać widżet statystyk miesięcznych `RazdMonthlyStatsWidget` — tabela 30 dni w `stats_widget.py`
+- [x] Napisać testy pytest dla `compute_day_stats` — 7 testów: brak danych, single event, active+idle, uptime 8h, nakładające się ts, edge 23:59, typ zwracany

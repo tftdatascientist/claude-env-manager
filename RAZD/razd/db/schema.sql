@@ -126,3 +126,53 @@ CREATE TABLE IF NOT EXISTS app_usage (
     is_dev_tool INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_app_usage_last_seen ON app_usage(last_seen_at);
+
+-- Projekty pobrane z Notion
+CREATE TABLE IF NOT EXISTS notion_projects (
+    id INTEGER PRIMARY KEY,
+    notion_page_id TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    status TEXT,
+    priority TEXT,
+    due_date TEXT,
+    raw_properties TEXT NOT NULL DEFAULT '{}',  -- JSON z wszystkimi polami z Notion
+    synced_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_notion_projects_page_id ON notion_projects(notion_page_id);
+
+-- Powiązanie sesji focus z projektem Notion lub projektem custom
+CREATE TABLE IF NOT EXISTS focus_session_project (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL UNIQUE REFERENCES focus_sessions(id) ON DELETE CASCADE,
+    notion_project_id INTEGER REFERENCES notion_projects(id),  -- NULL jeśli custom
+    custom_project_name TEXT,                                   -- NULL jeśli z Notion
+    notion_synced INTEGER NOT NULL DEFAULT 0,                   -- 1 po wysłaniu do Notion
+    synced_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_fsp_session ON focus_session_project(session_id);
+CREATE INDEX IF NOT EXISTS idx_fsp_project ON focus_session_project(notion_project_id);
+
+-- Przypięte projekty priorytetowe (max 4, każdy z kolorem)
+CREATE TABLE IF NOT EXISTS pinned_projects (
+    slot        INTEGER PRIMARY KEY CHECK (slot BETWEEN 1 AND 4),
+    project_id  INTEGER NOT NULL REFERENCES notion_projects(id) ON DELETE CASCADE,
+    color       TEXT NOT NULL DEFAULT '#7C3AED'
+);
+
+-- Cache zadań z Notion
+CREATE TABLE IF NOT EXISTS notion_tasks (
+    id              INTEGER PRIMARY KEY,
+    notion_page_id  TEXT NOT NULL UNIQUE,
+    title           TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'Not started',
+    deadline        TEXT,
+    details         TEXT,
+    project_page_id TEXT,           -- notion_page_id projektu (relacja)
+    synced_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    dirty           INTEGER NOT NULL DEFAULT 0  -- 1 = zmiana lokalna czekająca na sync
+);
+
+CREATE INDEX IF NOT EXISTS idx_notion_tasks_project ON notion_tasks(project_page_id);
+CREATE INDEX IF NOT EXISTS idx_notion_tasks_status  ON notion_tasks(status);

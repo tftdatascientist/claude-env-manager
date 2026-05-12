@@ -23,28 +23,52 @@ def _find_desktop() -> Path:
 
 def generate_icon() -> Path:
     """
-    Rysuje ikonę RAZD (litera R, niebieski kwadrat) i zapisuje jako RAZD.ico
-    obok main.py. Zwraca ścieżkę do pliku.
+    Rysuje ikonę RAZD (białe R na niebieskim tle).
+    Próbuje zapisać wielowarstwowy ICO przez Pillow (16/32/48/256px).
+    Fallback: ICO przez Qt (tylko 256px) lub PNG.
     """
+    import io
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 
     output = Path(__file__).parent.parent / "RAZD.ico"
 
-    px = QPixmap(256, 256)
-    px.fill(QColor("#1565C0"))
-    painter = QPainter(px)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(QColor("white"))
-    painter.setFont(QFont("Arial", 155, QFont.Weight.Bold))
-    painter.drawText(px.rect(), Qt.AlignmentFlag.AlignCenter, "R")
-    painter.end()
+    def _render(size: int) -> QPixmap:
+        px = QPixmap(size, size)
+        px.fill(QColor("#1565C0"))
+        painter = QPainter(px)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QColor("white"))
+        painter.setFont(QFont("Arial", max(8, int(size * 0.60)), QFont.Weight.Bold))
+        painter.drawText(px.rect(), Qt.AlignmentFlag.AlignCenter, "R")
+        painter.end()
+        return px
 
-    if not px.save(str(output), "ICO"):
-        # Qt ICO plugin może nie być dostępny — fallback na PNG
+    try:
+        from PIL import Image as _Image
+
+        pil_images: list[_Image.Image] = []
+        for sz in (16, 32, 48, 256):
+            buf = io.BytesIO()
+            _render(sz).save(buf, "PNG")
+            buf.seek(0)
+            pil_images.append(_Image.open(buf).copy())
+
+        pil_images[0].save(
+            str(output),
+            format="ICO",
+            sizes=[(img.width, img.height) for img in pil_images],
+            append_images=pil_images[1:],
+        )
+        return output
+    except ImportError:
+        pass
+
+    # Fallback Qt — zapisuje 256px ICO
+    px256 = _render(256)
+    if not px256.save(str(output), "ICO"):
         output = output.with_suffix(".png")
-        px.save(str(output), "PNG")
-
+        px256.save(str(output), "PNG")
     return output
 
 

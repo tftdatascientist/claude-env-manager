@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 if TYPE_CHECKING:
-    from razd.db.repository import DailyReport
+    from razd.db.repository import DailyReport, RazdRepository
 
 
 def _fmt_time(seconds: int) -> str:
@@ -33,7 +33,12 @@ def _fmt_time(seconds: int) -> str:
 class RazdDailyReportDialog(QDialog):
     """Dialog z pełną analityką dnia — produktywność, focus, CC, przerwy, rozproszenie."""
 
-    def __init__(self, report: DailyReport, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        report: DailyReport,
+        parent: QWidget | None = None,
+        repo: RazdRepository | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"RAZD — Raport dnia: {report.date}")
         self.setMinimumWidth(520)
@@ -184,6 +189,25 @@ class RazdDailyReportDialog(QDialog):
         else:
             dist_layout.addWidget(QLabel("Brak alertów rozproszenia — świetna robota!"))
         root.addWidget(dist_box)
+
+        # --- Statystyki tygodnia i miesiąca (jeśli repo dostępne) ---
+        if repo is not None:
+            from razd.ui.stats_widget import RazdMonthlyStatsWidget, RazdWeeklyStatsWidget
+
+            week_box = QGroupBox("Statystyki tygodnia")
+            week_layout = QVBoxLayout(week_box)
+            week_layout.setContentsMargins(6, 6, 6, 6)
+            week_widget = RazdWeeklyStatsWidget(repo)
+            week_layout.addWidget(week_widget)
+            root.addWidget(week_box)
+
+            month_box = QGroupBox("Statystyki miesiąca (30 dni)")
+            month_layout = QVBoxLayout(month_box)
+            month_layout.setContentsMargins(6, 6, 6, 6)
+            month_widget = RazdMonthlyStatsWidget(repo)
+            month_widget.setMinimumHeight(280)
+            month_layout.addWidget(month_widget)
+            root.addWidget(month_box)
 
         scroll.setWidget(inner)
 

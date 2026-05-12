@@ -24,3 +24,4 @@ distraction_threshold = 6.0  # przełączeń apek/min powyżej którego alert sk
 enabled = false               # włącz sync do Notion (wymaga tokena w .env)
 sync_interval_mins = 15       # co ile minut synchronizuj
 export_urls = false           # czy wysyłać URL-e (privacy — domyślnie false)
+projects_db_id = ""           # ID bazy projektów (override przez RAZD_NOTION_PROJECTS_DB_ID w .env)

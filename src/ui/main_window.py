@@ -134,6 +134,28 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(index)
         if index == self._PAGE_ZADANIA:
             self._sync_zadania_from_active_slot()
+        if index == self._PAGE_PROJEKTANT:
+            self._sync_projektant_from_active_slot()
+
+    def _sync_projektant_from_active_slot(self) -> None:
+        """Przekaż projekt aktywnego slotu CC do ProjectantPanel jeśli nie ma już projektu."""
+        if self._projektant_panel._project_path is not None:
+            return
+        try:
+            from pathlib import Path
+            slot = self._cc_launcher_panel._slots[
+                self._cc_launcher_panel._slot_tabs.currentIndex()
+            ]
+            raw = None
+            if hasattr(slot, "_path_edit"):
+                pe = slot._path_edit
+                raw = (pe.toPlainText() if hasattr(pe, "toPlainText") else pe.text()).strip()
+            elif hasattr(slot, "_path_to_cc_project_dir"):
+                raw = str(slot._path_to_cc_project_dir)
+            if raw and Path(raw).exists():
+                self._projektant_panel.set_project_path(Path(raw))
+        except Exception:
+            pass
 
     def _show_page_hooks(self, tab_index: int = 0) -> None:
         self._show_page(self._PAGE_HOOKER)
